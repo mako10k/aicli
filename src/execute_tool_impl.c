@@ -236,22 +236,42 @@ static bool stage_grep_fixed(const char *in, size_t in_len, const char *needle, 
 	return true;
 }
 
-static bool parse_sed_n_script(const char *script, size_t *out_addr, char *out_cmd) {
-	// Accept only: "Np" or "Nd" where N is 1-based integer.
+static bool parse_sed_n_script(const char *script, size_t *out_start, size_t *out_end, char *out_cmd) {
+	// Accept only:
+	//  - "Np" / "Nd" (single address)
+	//  - "N,Mp" / "N,Md" (range address)
+	// Where N/M are 1-based integers.
 	if (!script || !*script) return false;
 	char *end = NULL;
-	unsigned long v = strtoul(script, &end, 10);
+	unsigned long v1 = strtoul(script, &end, 10);
 	if (!end || end == script) return false;
+	if (v1 == 0) return false;
+
+	unsigned long v2 = v1;
+	if (*end == ',') {
+		end++;
+		char *end2 = NULL;
+		v2 = strtoul(end, &end2, 10);
+		if (!end2 || end2 == end) return false;
+		if (v2 == 0) return false;
+		end = end2;
+	}
+
 	if (*end != 'p' && *end != 'd') return false;
 	if (end[1] != '\0') return false;
-	*out_addr = (size_t)v;
+
+	if (v1 > v2) return false;
+	*out_start = (size_t)v1;
+	*out_end = (size_t)v2;
 	*out_cmd = *end;
-	return v > 0;
+	return true;
 }
 
-static bool stage_sed_n_addr(const char *in, size_t in_len, size_t addr, char cmd, aicli_buf_t *out) {
-	// Implements: sed -n 'Np' (print only line N) / sed -n 'Nd' (delete line N; print others)
-	if (addr == 0) return false;
+static bool stage_sed_n_addr(const char *in, size_t in_len, size_t start_addr, size_t end_addr, char cmd,
+			     aicli_buf_t *out) {
+	// Implements: sed -n 'Np'/'Nd' and 'N,Mp'/'N,Md'
+	if (start_addr == 0 || end_addr == 0) return false;
+	if (start_addr > end_addr) return false;
 
 	unsigned long line_no = 1;
 	size_t i = 0;
@@ -261,11 +281,12 @@ static bool stage_sed_n_addr(const char *in, size_t in_len, size_t addr, char cm
 			size_t line_len = i - line_start;
 			const char *line = in + line_start;
 
+			bool in_range = (line_no >= start_addr && line_no <= end_addr);
 			bool emit = false;
 			if (cmd == 'p') {
-				emit = (line_no == addr);
+				emit = in_range;
 			} else if (cmd == 'd') {
-				emit = (line_no != addr);
+				emit = !in_range;
 			} else {
 				return false;
 			}
@@ -349,11 +370,11 @@ static bool parse_grep_args(const aicli_dsl_stage_t *st, const char **out_patter
 	return false;
 }
 
-static bool parse_sed_args(const aicli_dsl_stage_t *st, size_t *out_addr, char *out_cmd) {
-	// sed -n 'Np' | sed -n 'Nd'
+static bool parse_sed_args(const aicli_dsl_stage_t *st, size_t *out_start, size_t *out_end, char *out_cmd) {
+	// sed -n 'Np'/'Nd' and 'N,Mp'/'N,Md'
 	if (st->argc != 3) return false;
 	if (strcmp(st->argv[1], "-n") != 0) return false;
-	return parse_sed_n_script(st->argv[2], out_addr, out_cmd);
+	return parse_sed_n_script(st->argv[2], out_start, out_end, out_cmd);
 }
 
 static void apply_paging(const char *data, size_t total, size_t start, size_t size,
@@ -496,12 +517,13 @@ int aicli_execute_run(const aicli_allowlist_t *allow,
 				ok = stage_grep_fixed(cur, cur_len, pattern, with_n, &tmp1);
 			}
 		} else if (stg->kind == AICLI_CMD_SED) {
-			size_t addr = 0;
+			size_t start_addr = 0;
+			size_t end_addr = 0;
 			char cmd = 0;
-			if (!parse_sed_args(stg, &addr, &cmd)) {
+			if (!parse_sed_args(stg, &start_addr, &end_addr, &cmd)) {
 				ok = false;
 			} else {
-				ok = stage_sed_n_addr(cur, cur_len, addr, cmd, &tmp1);
+				ok = stage_sed_n_addr(cur, cur_len, start_addr, end_addr, cmd, &tmp1);
 			}
 		} else {
 			ok = false;

@@ -49,6 +49,11 @@ test "$s1" = $'l2'
 s2=$("$bin" _exec --file tmp/sed.txt "cat tmp/sed.txt | sed -n '2d'" 2>/dev/null | tr -d '\r')
 test "$s2" = $'l1\nl3'
 
+s3=$("$bin" _exec --file tmp/sed.txt "cat tmp/sed.txt | sed -n '2,3p'" 2>/dev/null | tr -d '\r')
+test "$s3" = $'l2\nl3'
+s4=$("$bin" _exec --file tmp/sed.txt "cat tmp/sed.txt | sed -n '2,3d'" 2>/dev/null | tr -d '\r')
+test "$s4" = $'l1'
+
 # pipe: wc
 bytes=$("$bin" _exec --file ../README.md "cat ../README.md | wc -c" 2>/dev/null | tr -d '\n')
 echo "$bytes" | grep -qE '^[0-9]+$'
