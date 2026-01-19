@@ -28,3 +28,4 @@ src/aicli
 tests/*.log
 tests/*.trs
 tests/test-suite.log
+Makefile
