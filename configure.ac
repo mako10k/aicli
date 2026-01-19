@@ -15,6 +15,9 @@ AX_PTHREAD
 # libcurl (required)
 PKG_CHECK_MODULES([CURL],[libcurl])
 
+# vendored yyjson
+AC_MSG_NOTICE([checking for vendored yyjson... yes])
+AC_DEFINE([HAVE_YYJSON_H],[1],[Define to 1 if you have the <yyjson.h> header file.])
 # yyjson: prefer vendored copy; fall back to system header
 AC_MSG_CHECKING([for vendored yyjson])
 if test -f "${srcdir}/vendor/yyjson/yyjson.h"; then

@@ -97,6 +97,152 @@ static void fprint_wrapped(FILE *out, const char *indent, const char *text,
 	fputc('\n', out);
 }
 
+static const char *skip_json_ws(const char *s, const char *end)
+{
+	while (s && s < end && (*s == ' ' || *s == '\t' || *s == '\n' || *s == '\r'))
+		s++;
+	return s;
+}
+
+static const char *parse_json_string_value(const char *s, const char *end,
+				      char *out, size_t out_cap)
+{
+	// Parses a JSON string starting at '"' and decodes a small subset of escapes.
+	// Returns pointer just after closing quote, or NULL on failure.
+	if (!s || s >= end || *s != '"' || !out || out_cap == 0)
+		return NULL;
+	s++;
+	size_t oi = 0;
+	while (s < end) {
+		unsigned char c = (unsigned char)*s++;
+		if (c == '"') {
+			out[oi] = '\0';
+			return s;
+		}
+		if (c == '\\') {
+			if (s >= end)
+				return NULL;
+			unsigned char e = (unsigned char)*s++;
+			switch (e) {
+			case '"':
+			case '\\':
+			case '/':
+				c = e;
+				break;
+			case 'b':
+				c = '\b';
+				break;
+			case 'f':
+				c = '\f';
+				break;
+			case 'n':
+				c = '\n';
+				break;
+			case 'r':
+				c = '\r';
+				break;
+			case 't':
+				c = '\t';
+				break;
+			case 'u':
+				// Skip \uXXXX without full Unicode decoding (best-effort).
+				if (s + 3 >= end)
+					return NULL;
+				s += 4;
+				c = '?';
+				break;
+			default:
+				c = '?';
+				break;
+			}
+		}
+		if (oi + 1 < out_cap)
+			out[oi++] = (char)c;
+	}
+	return NULL;
+}
+
+static int google_cse_print_formatted_from_json(const char *json, size_t json_len,
+					const char *query, int count,
+					size_t max_title, size_t max_url, size_t max_snippet,
+					size_t width)
+{
+	if (!json || json_len == 0)
+		return 1;
+	const char *s = json;
+	const char *end = json + json_len;
+
+	const char *items = strstr(json, "\"items\"");
+	if (!items)
+		return 2;
+	items = strstr(items, "[");
+	if (!items)
+		return 2;
+	s = items + 1;
+
+	printf("# Google Custom Search\n");
+	printf("query: %s\n\n", query ? query : "");
+
+	int printed = 0;
+	while (s < end && printed < count) {
+		const char *obj = strstr(s, "{");
+		if (!obj)
+			break;
+		const char *obj_end = strstr(obj, "}");
+		if (!obj_end)
+			break;
+
+		char title[1024] = {0};
+		char link[2048] = {0};
+		char snippet[2048] = {0};
+
+		const char *p;
+		p = strstr(obj, "\"title\"");
+		if (p && p < obj_end) {
+			p = strchr(p, ':');
+			if (p && p < obj_end) {
+				p++;
+				p = skip_json_ws(p, obj_end);
+				if (p && p < obj_end && *p == '"')
+					parse_json_string_value(p, obj_end, title, sizeof(title));
+			}
+		}
+		p = strstr(obj, "\"link\"");
+		if (p && p < obj_end) {
+			p = strchr(p, ':');
+			if (p && p < obj_end) {
+				p++;
+				p = skip_json_ws(p, obj_end);
+				if (p && p < obj_end && *p == '"')
+					parse_json_string_value(p, obj_end, link, sizeof(link));
+			}
+		}
+		p = strstr(obj, "\"snippet\"");
+		if (p && p < obj_end) {
+			p = strchr(p, ':');
+			if (p && p < obj_end) {
+				p++;
+				p = skip_json_ws(p, obj_end);
+				if (p && p < obj_end && *p == '"')
+					parse_json_string_value(p, obj_end, snippet, sizeof(snippet));
+			}
+		}
+
+		if (title[0] != '\0' || link[0] != '\0' || snippet[0] != '\0') {
+			printed++;
+			printf("%d) ", printed);
+			fprint_wrapped(stdout, "", title, max_title, width);
+			fprint_wrapped(stdout, "    ", link, max_url, width);
+			fprint_wrapped(stdout, "    ", snippet, max_snippet, width);
+			fputc('\n', stdout);
+		}
+
+		s = obj_end + 1;
+	}
+
+	return (printed > 0) ? 0 : 3;
+}
+
 static size_t detect_tty_width_or_default(size_t fallback)
 {
 	if (fallback < 20)
@@ -653,7 +799,7 @@ static int cmd_web_search(int argc, char **argv, const aicli_config_t *cfg)
 			return 1;
 		}
 
-		if (raw_json || res.body_len <= 4096) {
+		if (raw_json) {
 			if (res.body && res.body_len)
 				fwrite(res.body, 1, res.body_len, stdout);
 			fputc('\n', stdout);
@@ -661,53 +807,14 @@ static int cmd_web_search(int argc, char **argv, const aicli_config_t *cfg)
 			return 0;
 		}
 
-#if HAVE_YYJSON_H
-		yyjson_read_err err;
-		yyjson_doc *doc = yyjson_read(res.body, res.body_len, 0, NULL, &err);
-		if (!doc) {
-			fprintf(stderr, "yyjson parse error: %s at %zu\n", err.msg, (size_t)err.pos);
-		} else {
-			yyjson_val *root = yyjson_doc_get_root(doc);
-			yyjson_val *items = root ? yyjson_obj_get(root, "items") : NULL;
-			if (!items || !yyjson_is_arr(items)) {
-				fprintf(stderr, "unexpected JSON shape: missing items[]\n");
-			} else {
-				printf("# Google Custom Search\n");
-				printf("query: %s\n\n", query);
-
-				size_t max = yyjson_arr_size(items);
-				if (max > (size_t)count)
-					max = (size_t)count;
-				for (size_t idx = 0; idx < max; idx++) {
-					yyjson_val *it = yyjson_arr_get(items, idx);
-					const char *title = "";
-					const char *url = "";
-					const char *desc = "";
-					yyjson_val *v;
-					v = it ? yyjson_obj_get(it, "title") : NULL;
-					if (v && yyjson_is_str(v))
-						title = yyjson_get_str(v);
-					v = it ? yyjson_obj_get(it, "link") : NULL;
-					if (v && yyjson_is_str(v))
-						url = yyjson_get_str(v);
-					v = it ? yyjson_obj_get(it, "snippet") : NULL;
-					if (v && yyjson_is_str(v))
-						desc = yyjson_get_str(v);
-
-					printf("%zu) ", idx + 1);
-					fprint_wrapped(stdout, "", title, max_title, width);
-					fprint_wrapped(stdout, "    ", url, max_url, width);
-					fprint_wrapped(stdout, "    ", desc, max_snippet, width);
-					fputc('\n', stdout);
-				}
-				yyjson_doc_free(doc);
-				aicli_google_response_free(&res);
-				return 0;
-			}
-			yyjson_doc_free(doc);
+		// Default: print a formatted view (best-effort, no JSON library needed).
+		if (google_cse_print_formatted_from_json(res.body, res.body_len, query, count,
+						max_title, max_url, max_snippet, width) == 0) {
+			aicli_google_response_free(&res);
+			return 0;
 		}
-#endif
 
+		// Fallback: print the first ~4KB.
 		size_t n = res.body_len;
 		if (n > 4096)
 			n = 4096;
@@ -752,10 +859,9 @@ static int cmd_web_search(int argc, char **argv, const aicli_config_t *cfg)
 
 #if HAVE_YYJSON_H
 	// If yyjson is available, extract and print a compact view.
-	yyjson_read_err err;
-	yyjson_doc *doc = yyjson_read(res.body, res.body_len, 0, NULL, &err);
+	yyjson_doc *doc = yyjson_read(res.body, res.body_len, 0);
 	if (!doc) {
-		fprintf(stderr, "yyjson parse error: %s at %zu\n", err.msg, (size_t)err.pos);
+		fprintf(stderr, "yyjson parse error\n");
 		// Fall back to truncation below.
 	} else {
 		yyjson_val *root = yyjson_doc_get_root(doc);
