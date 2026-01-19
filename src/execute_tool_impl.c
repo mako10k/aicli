@@ -126,6 +126,71 @@ static bool stage_wc(const char *in, size_t in_len, char mode, aicli_buf_t *out)
 	return aicli_buf_append(out, buf, (size_t)n);
 }
 
+typedef struct aicli_line_view {
+	const char *s;
+	size_t len;
+} aicli_line_view_t;
+
+static int cmp_line_asc(const void *a, const void *b) {
+	const aicli_line_view_t *la = (const aicli_line_view_t *)a;
+	const aicli_line_view_t *lb = (const aicli_line_view_t *)b;
+	size_t min = la->len < lb->len ? la->len : lb->len;
+	int c = memcmp(la->s, lb->s, min);
+	if (c != 0) return c;
+	if (la->len < lb->len) return -1;
+	if (la->len > lb->len) return 1;
+	return 0;
+}
+
+static int cmp_line_desc(const void *a, const void *b) {
+	return -cmp_line_asc(a, b);
+}
+
+static bool stage_sort_lines(const char *in, size_t in_len, bool reverse, aicli_buf_t *out) {
+	// Split into line views, sort lexicographically, join with '\n'.
+	// Always emits a trailing '\n' when input has at least one line.
+	if (in_len == 0) return true;
+
+	size_t line_count = 0;
+	for (size_t i = 0; i < in_len; i++) if (in[i] == '\n') line_count++;
+	if (in[in_len - 1] != '\n') line_count++;
+	if (line_count == 0) return true;
+
+	aicli_line_view_t *lines = (aicli_line_view_t *)calloc(line_count, sizeof(aicli_line_view_t));
+	if (!lines) return false;
+
+	size_t idx = 0;
+	size_t start = 0;
+	for (size_t i = 0; i <= in_len; i++) {
+		if (i == in_len || in[i] == '\n') {
+			if (idx < line_count) {
+				lines[idx].s = in + start;
+				lines[idx].len = i - start;
+				idx++;
+			}
+			start = i + 1;
+		}
+	}
+
+	qsort(lines, line_count, sizeof(aicli_line_view_t), reverse ? cmp_line_desc : cmp_line_asc);
+
+	for (size_t i = 0; i < line_count; i++) {
+		if (lines[i].len > 0) {
+			if (!aicli_buf_append(out, lines[i].s, lines[i].len)) {
+				free(lines);
+				return false;
+			}
+		}
+		if (!aicli_buf_append(out, "\n", 1)) {
+			free(lines);
+			return false;
+		}
+	}
+
+	free(lines);
+	return true;
+}
+
 static size_t parse_head_n(const aicli_dsl_stage_t *st, bool *ok) {
 	*ok = true;
 	// head -n N
@@ -159,6 +224,19 @@ static bool parse_wc_mode(const aicli_dsl_stage_t *st, char *out_mode) {
 	if (st->argc != 2) return false;
 	if (strcmp(st->argv[1], "-l") == 0) { *out_mode = 'l'; return true; }
 	if (strcmp(st->argv[1], "-c") == 0) { *out_mode = 'c'; return true; }
+	return false;
+}
+
+static bool parse_sort_reverse(const aicli_dsl_stage_t *st, bool *out_reverse) {
+	// sort | sort -r
+	if (st->argc == 1) {
+		*out_reverse = false;
+		return true;
+	}
+	if (st->argc == 2 && strcmp(st->argv[1], "-r") == 0) {
+		*out_reverse = true;
+		return true;
+	}
 	return false;
 }
 
@@ -285,6 +363,13 @@ int aicli_execute_run(const aicli_allowlist_t *allow,
 				ok = false;
 			} else {
 				ok = stage_wc(cur, cur_len, mode, &tmp1);
+			}
+		} else if (stg->kind == AICLI_CMD_SORT) {
+			bool reverse = false;
+			if (!parse_sort_reverse(stg, &reverse)) {
+				ok = false;
+			} else {
+				ok = stage_sort_lines(cur, cur_len, reverse, &tmp1);
 			}
 		} else {
 			ok = false;

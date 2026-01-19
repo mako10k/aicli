@@ -29,6 +29,12 @@ echo "$line1" | grep -q $'^\s*1\t# aicli'
 last=$("$bin" _exec --file ../README.md "cat ../README.md | tail -n 1" 2>/dev/null)
 test -n "$last"
 
+# pipe: sort
+mkdir -p tmp
+printf "b\na\nc\n" > tmp/sort.txt
+sorted=$("$bin" _exec --file tmp/sort.txt "cat tmp/sort.txt | sort" 2>/dev/null | tr -d '\r')
+test "$sorted" = $'a\nb\nc'
+
 # pipe: wc
 bytes=$("$bin" _exec --file ../README.md "cat ../README.md | wc -c" 2>/dev/null | tr -d '\n')
 echo "$bytes" | grep -qE '^[0-9]+$'
