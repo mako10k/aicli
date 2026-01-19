@@ -8,18 +8,23 @@
 #include <stdlib.h>
 #include <string.h>
 
-static bool allowlist_contains(const aicli_allowlist_t *allow, const char *path) {
-	if (!allow || !path) return false;
+static bool allowlist_contains(const aicli_allowlist_t *allow, const char *path)
+{
+	if (!allow || !path)
+		return false;
 	for (int i = 0; i < allow->file_count; i++) {
-		if (strcmp(allow->files[i].path, path) == 0) return true;
+		if (strcmp(allow->files[i].path, path) == 0)
+			return true;
 	}
 	return false;
 }
 
-static int read_file_range(const char *path, size_t start, size_t max_bytes,
-				   char **out_buf, size_t *out_len, size_t *out_total) {
+static int read_file_range(const char *path, size_t start, size_t max_bytes, char **out_buf,
+                           size_t *out_len, size_t *out_total)
+{
 	FILE *fp = fopen(path, "rb");
-	if (!fp) return -1;
+	if (!fp)
+		return -1;
 
 	if (fseek(fp, 0, SEEK_END) != 0) {
 		fclose(fp);
@@ -32,14 +37,16 @@ static int read_file_range(const char *path, size_t start, size_t max_bytes,
 	}
 	*out_total = (size_t)total;
 
-	if ((long)start > total) start = (size_t)total;
+	if ((long)start > total)
+		start = (size_t)total;
 	if (fseek(fp, (long)start, SEEK_SET) != 0) {
 		fclose(fp);
 		return -1;
 	}
 
 	size_t to_read = max_bytes;
-	if (start + to_read > (size_t)total) to_read = (size_t)total - start;
+	if (start + to_read > (size_t)total)
+		to_read = (size_t)total - start;
 
 	char *buf = (char *)malloc(to_read + 1);
 	if (!buf) {
@@ -55,7 +62,8 @@ static int read_file_range(const char *path, size_t start, size_t max_bytes,
 	return 0;
 }
 
-static bool stage_nl(const char *in, size_t in_len, aicli_buf_t *out) {
+static bool stage_nl(const char *in, size_t in_len, aicli_buf_t *out)
+{
 	// Simple line numbering: "     1\t..."
 	unsigned long line = 1;
 	size_t i = 0;
@@ -64,11 +72,15 @@ static bool stage_nl(const char *in, size_t in_len, aicli_buf_t *out) {
 		if (i == in_len || in[i] == '\n') {
 			char prefix[32];
 			int n = snprintf(prefix, sizeof(prefix), "%6lu\t", line);
-			if (n < 0) return false;
-			if (!aicli_buf_append(out, prefix, (size_t)n)) return false;
-			if (!aicli_buf_append(out, in + line_start, i - line_start)) return false;
+			if (n < 0)
+				return false;
+			if (!aicli_buf_append(out, prefix, (size_t)n))
+				return false;
+			if (!aicli_buf_append(out, in + line_start, i - line_start))
+				return false;
 			if (i < in_len) {
-				if (!aicli_buf_append(out, "\n", 1)) return false;
+				if (!aicli_buf_append(out, "\n", 1))
+					return false;
 			}
 			line++;
 			line_start = i + 1;
@@ -78,23 +90,29 @@ static bool stage_nl(const char *in, size_t in_len, aicli_buf_t *out) {
 	return true;
 }
 
-static bool stage_head(const char *in, size_t in_len, size_t nlines, aicli_buf_t *out) {
-	if (nlines == 0) return true;
+static bool stage_head(const char *in, size_t in_len, size_t nlines, aicli_buf_t *out)
+{
+	if (nlines == 0)
+		return true;
 	size_t lines = 0;
 	size_t i = 0;
 	while (i < in_len) {
-		if (!aicli_buf_append(out, &in[i], 1)) return false;
+		if (!aicli_buf_append(out, &in[i], 1))
+			return false;
 		if (in[i] == '\n') {
 			lines++;
-			if (lines >= nlines) break;
+			if (lines >= nlines)
+				break;
 		}
 		i++;
 	}
 	return true;
 }
 
-static bool stage_tail(const char *in, size_t in_len, size_t nlines, aicli_buf_t *out) {
-	if (nlines == 0) return true;
+static bool stage_tail(const char *in, size_t in_len, size_t nlines, aicli_buf_t *out)
+{
+	if (nlines == 0)
+		return true;
 	// Find start position of the last N lines.
 	size_t lines = 0;
 	for (size_t i = in_len; i > 0; i--) {
@@ -111,19 +129,23 @@ static bool stage_tail(const char *in, size_t in_len, size_t nlines, aicli_buf_t
 	return aicli_buf_append(out, in, in_len);
 }
 
-static bool stage_wc(const char *in, size_t in_len, char mode, aicli_buf_t *out) {
+static bool stage_wc(const char *in, size_t in_len, char mode, aicli_buf_t *out)
+{
 	// mode: 'l' or 'c'
 	unsigned long long v = 0;
 	if (mode == 'c') {
 		v = (unsigned long long)in_len;
 	} else if (mode == 'l') {
-		for (size_t i = 0; i < in_len; i++) if (in[i] == '\n') v++;
+		for (size_t i = 0; i < in_len; i++)
+			if (in[i] == '\n')
+				v++;
 	} else {
 		return false;
 	}
 	char buf[64];
 	int n = snprintf(buf, sizeof(buf), "%llu\n", v);
-	if (n < 0) return false;
+	if (n < 0)
+		return false;
 	return aicli_buf_append(out, buf, (size_t)n);
 }
 
@@ -132,33 +154,46 @@ typedef struct aicli_line_view {
 	size_t len;
 } aicli_line_view_t;
 
-static int cmp_line_asc(const void *a, const void *b) {
+static int cmp_line_asc(const void *a, const void *b)
+{
 	const aicli_line_view_t *la = (const aicli_line_view_t *)a;
 	const aicli_line_view_t *lb = (const aicli_line_view_t *)b;
 	size_t min = la->len < lb->len ? la->len : lb->len;
 	int c = memcmp(la->s, lb->s, min);
-	if (c != 0) return c;
-	if (la->len < lb->len) return -1;
-	if (la->len > lb->len) return 1;
+	if (c != 0)
+		return c;
+	if (la->len < lb->len)
+		return -1;
+	if (la->len > lb->len)
+		return 1;
 	return 0;
 }
 
-static int cmp_line_desc(const void *a, const void *b) {
+static int cmp_line_desc(const void *a, const void *b)
+{
 	return -cmp_line_asc(a, b);
 }
 
-static bool stage_sort_lines(const char *in, size_t in_len, bool reverse, aicli_buf_t *out) {
+static bool stage_sort_lines(const char *in, size_t in_len, bool reverse, aicli_buf_t *out)
+{
 	// Split into line views, sort lexicographically, join with '\n'.
 	// Always emits a trailing '\n' when input has at least one line.
-	if (in_len == 0) return true;
+	if (in_len == 0)
+		return true;
 
 	size_t line_count = 0;
-	for (size_t i = 0; i < in_len; i++) if (in[i] == '\n') line_count++;
-	if (in[in_len - 1] != '\n') line_count++;
-	if (line_count == 0) return true;
+	for (size_t i = 0; i < in_len; i++)
+		if (in[i] == '\n')
+			line_count++;
+	if (in[in_len - 1] != '\n')
+		line_count++;
+	if (line_count == 0)
+		return true;
 
-	aicli_line_view_t *lines = (aicli_line_view_t *)calloc(line_count, sizeof(aicli_line_view_t));
-	if (!lines) return false;
+	aicli_line_view_t *lines =
+	    (aicli_line_view_t *)calloc(line_count, sizeof(aicli_line_view_t));
+	if (!lines)
+		return false;
 
 	size_t idx = 0;
 	size_t start = 0;
@@ -192,9 +227,11 @@ static bool stage_sort_lines(const char *in, size_t in_len, bool reverse, aicli_
 	return true;
 }
 
-static bool stage_grep_fixed(const char *in, size_t in_len, const char *needle, bool with_line_numbers,
-			     aicli_buf_t *out) {
-	if (!needle || needle[0] == '\0') return true;
+static bool stage_grep_fixed(const char *in, size_t in_len, const char *needle,
+                             bool with_line_numbers, aicli_buf_t *out)
+{
+	if (!needle || needle[0] == '\0')
+		return true;
 	const size_t needle_len = strlen(needle);
 
 	unsigned long line_no = 1;
@@ -219,13 +256,17 @@ static bool stage_grep_fixed(const char *in, size_t in_len, const char *needle, 
 				if (with_line_numbers) {
 					char prefix[32];
 					int n = snprintf(prefix, sizeof(prefix), "%lu:", line_no);
-					if (n < 0) return false;
-					if (!aicli_buf_append(out, prefix, (size_t)n)) return false;
+					if (n < 0)
+						return false;
+					if (!aicli_buf_append(out, prefix, (size_t)n))
+						return false;
 				}
 				if (line_len > 0) {
-					if (!aicli_buf_append(out, line, line_len)) return false;
+					if (!aicli_buf_append(out, line, line_len))
+						return false;
 				}
-				if (!aicli_buf_append(out, "\n", 1)) return false;
+				if (!aicli_buf_append(out, "\n", 1))
+					return false;
 			}
 
 			line_no++;
@@ -236,42 +277,55 @@ static bool stage_grep_fixed(const char *in, size_t in_len, const char *needle, 
 	return true;
 }
 
-static bool parse_sed_n_script(const char *script, size_t *out_start, size_t *out_end, char *out_cmd) {
+static bool parse_sed_n_script(const char *script, size_t *out_start, size_t *out_end,
+                               char *out_cmd)
+{
 	// Accept only:
 	//  - "Np" / "Nd" (single address)
 	//  - "N,Mp" / "N,Md" (range address)
 	// Where N/M are 1-based integers.
-	if (!script || !*script) return false;
+	if (!script || !*script)
+		return false;
 	char *end = NULL;
 	unsigned long v1 = strtoul(script, &end, 10);
-	if (!end || end == script) return false;
-	if (v1 == 0) return false;
+	if (!end || end == script)
+		return false;
+	if (v1 == 0)
+		return false;
 
 	unsigned long v2 = v1;
 	if (*end == ',') {
 		end++;
 		char *end2 = NULL;
 		v2 = strtoul(end, &end2, 10);
-		if (!end2 || end2 == end) return false;
-		if (v2 == 0) return false;
+		if (!end2 || end2 == end)
+			return false;
+		if (v2 == 0)
+			return false;
 		end = end2;
 	}
 
-	if (*end != 'p' && *end != 'd') return false;
-	if (end[1] != '\0') return false;
+	if (*end != 'p' && *end != 'd')
+		return false;
+	if (end[1] != '\0')
+		return false;
 
-	if (v1 > v2) return false;
+	if (v1 > v2)
+		return false;
 	*out_start = (size_t)v1;
 	*out_end = (size_t)v2;
 	*out_cmd = *end;
 	return true;
 }
 
-static bool stage_sed_n_addr(const char *in, size_t in_len, size_t start_addr, size_t end_addr, char cmd,
-			     aicli_buf_t *out) {
+static bool stage_sed_n_addr(const char *in, size_t in_len, size_t start_addr, size_t end_addr,
+                             char cmd, aicli_buf_t *out)
+{
 	// Implements: sed -n 'Np'/'Nd' and 'N,Mp'/'N,Md'
-	if (start_addr == 0 || end_addr == 0) return false;
-	if (start_addr > end_addr) return false;
+	if (start_addr == 0 || end_addr == 0)
+		return false;
+	if (start_addr > end_addr)
+		return false;
 
 	unsigned long line_no = 1;
 	size_t i = 0;
@@ -293,9 +347,11 @@ static bool stage_sed_n_addr(const char *in, size_t in_len, size_t start_addr, s
 
 			if (emit) {
 				if (line_len > 0) {
-					if (!aicli_buf_append(out, line, line_len)) return false;
+					if (!aicli_buf_append(out, line, line_len))
+						return false;
 				}
-				if (!aicli_buf_append(out, "\n", 1)) return false;
+				if (!aicli_buf_append(out, "\n", 1))
+					return false;
 			}
 
 			line_no++;
@@ -306,43 +362,62 @@ static bool stage_sed_n_addr(const char *in, size_t in_len, size_t start_addr, s
 	return true;
 }
 
-static size_t parse_head_n(const aicli_dsl_stage_t *st, bool *ok) {
+static size_t parse_head_n(const aicli_dsl_stage_t *st, bool *ok)
+{
 	*ok = true;
 	// head -n N
-	if (st->argc == 1) return 10;
+	if (st->argc == 1)
+		return 10;
 	if (st->argc == 3 && strcmp(st->argv[1], "-n") == 0) {
 		char *end = NULL;
 		unsigned long v = strtoul(st->argv[2], &end, 10);
-		if (!end || *end != '\0') { *ok = false; return 0; }
+		if (!end || *end != '\0') {
+			*ok = false;
+			return 0;
+		}
 		return (size_t)v;
 	}
 	*ok = false;
 	return 0;
 }
 
-static size_t parse_tail_n(const aicli_dsl_stage_t *st, bool *ok) {
+static size_t parse_tail_n(const aicli_dsl_stage_t *st, bool *ok)
+{
 	*ok = true;
 	// tail -n N
-	if (st->argc == 1) return 10;
+	if (st->argc == 1)
+		return 10;
 	if (st->argc == 3 && strcmp(st->argv[1], "-n") == 0) {
 		char *end = NULL;
 		unsigned long v = strtoul(st->argv[2], &end, 10);
-		if (!end || *end != '\0') { *ok = false; return 0; }
+		if (!end || *end != '\0') {
+			*ok = false;
+			return 0;
+		}
 		return (size_t)v;
 	}
 	*ok = false;
 	return 0;
 }
 
-static bool parse_wc_mode(const aicli_dsl_stage_t *st, char *out_mode) {
+static bool parse_wc_mode(const aicli_dsl_stage_t *st, char *out_mode)
+{
 	// wc -l | wc -c
-	if (st->argc != 2) return false;
-	if (strcmp(st->argv[1], "-l") == 0) { *out_mode = 'l'; return true; }
-	if (strcmp(st->argv[1], "-c") == 0) { *out_mode = 'c'; return true; }
+	if (st->argc != 2)
+		return false;
+	if (strcmp(st->argv[1], "-l") == 0) {
+		*out_mode = 'l';
+		return true;
+	}
+	if (strcmp(st->argv[1], "-c") == 0) {
+		*out_mode = 'c';
+		return true;
+	}
 	return false;
 }
 
-static bool parse_sort_reverse(const aicli_dsl_stage_t *st, bool *out_reverse) {
+static bool parse_sort_reverse(const aicli_dsl_stage_t *st, bool *out_reverse)
+{
 	// sort | sort -r
 	if (st->argc == 1) {
 		*out_reverse = false;
@@ -355,7 +430,8 @@ static bool parse_sort_reverse(const aicli_dsl_stage_t *st, bool *out_reverse) {
 	return false;
 }
 
-static bool parse_grep_args(const aicli_dsl_stage_t *st, const char **out_pattern, bool *out_n) {
+static bool parse_grep_args(const aicli_dsl_stage_t *st, const char **out_pattern, bool *out_n)
+{
 	// grep PATTERN | grep -n PATTERN
 	if (st->argc == 2) {
 		*out_n = false;
@@ -370,16 +446,22 @@ static bool parse_grep_args(const aicli_dsl_stage_t *st, const char **out_patter
 	return false;
 }
 
-static bool parse_sed_args(const aicli_dsl_stage_t *st, size_t *out_start, size_t *out_end, char *out_cmd) {
+static bool parse_sed_args(const aicli_dsl_stage_t *st, size_t *out_start, size_t *out_end,
+                           char *out_cmd)
+{
 	// sed -n 'Np'/'Nd' and 'N,Mp'/'N,Md'
-	if (st->argc != 3) return false;
-	if (strcmp(st->argv[1], "-n") != 0) return false;
+	if (st->argc != 3)
+		return false;
+	if (strcmp(st->argv[1], "-n") != 0)
+		return false;
 	return parse_sed_n_script(st->argv[2], out_start, out_end, out_cmd);
 }
 
 static void apply_paging(const char *data, size_t total, size_t start, size_t size,
-				 aicli_tool_result_t *out) {
-	if (start > total) start = total;
+                         aicli_tool_result_t *out)
+{
+	if (start > total)
+		start = total;
 	size_t remain = total - start;
 	size_t n = remain < size ? remain : size;
 
@@ -401,14 +483,16 @@ static void apply_paging(const char *data, size_t total, size_t start, size_t si
 	out->next_start = start + n;
 }
 
-int aicli_execute_run(const aicli_allowlist_t *allow,
-				 const aicli_execute_request_t *req,
-				 aicli_tool_result_t *out) {
-	if (!req || !out) return -1;
+int aicli_execute_run(const aicli_allowlist_t *allow, const aicli_execute_request_t *req,
+                      aicli_tool_result_t *out)
+{
+	if (!req || !out)
+		return -1;
 	memset(out, 0, sizeof(*out));
 
 	size_t size = req->size ? req->size : AICLI_MAX_TOOL_BYTES;
-	if (size > AICLI_MAX_TOOL_BYTES) size = AICLI_MAX_TOOL_BYTES;
+	if (size > AICLI_MAX_TOOL_BYTES)
+		size = AICLI_MAX_TOOL_BYTES;
 
 	aicli_dsl_pipeline_t pipe;
 	aicli_dsl_status_t st = aicli_dsl_parse_pipeline(req->command, &pipe);
@@ -419,7 +503,8 @@ int aicli_execute_run(const aicli_allowlist_t *allow,
 	}
 
 	// MVP2: support `cat <FILE> | nl | head -n N` (nl/head optional)
-	if (pipe.stage_count < 1 || pipe.stages[0].kind != AICLI_CMD_CAT || pipe.stages[0].argc != 2) {
+	if (pipe.stage_count < 1 || pipe.stages[0].kind != AICLI_CMD_CAT ||
+	    pipe.stages[0].argc != 2) {
 		out->stderr_text = "mvp_requires: cat <FILE>";
 		out->exit_code = 2;
 		return 0;
@@ -523,7 +608,8 @@ int aicli_execute_run(const aicli_allowlist_t *allow,
 			if (!parse_sed_args(stg, &start_addr, &end_addr, &cmd)) {
 				ok = false;
 			} else {
-				ok = stage_sed_n_addr(cur, cur_len, start_addr, end_addr, cmd, &tmp1);
+				ok = stage_sed_n_addr(cur, cur_len, start_addr, end_addr, cmd,
+				                      &tmp1);
 			}
 		} else {
 			ok = false;

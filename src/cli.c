@@ -8,7 +8,8 @@
 #include "aicli_config.h"
 #include "execute_tool.h"
 
-static int cmd_exec_local(int argc, char **argv) {
+static int cmd_exec_local(int argc, char **argv)
+{
 	// Internal helper for MVP testing:
 	// aicli _exec --file PATH --start N --size N "cat PATH"
 	aicli_allowed_file_t files[16];
@@ -53,41 +54,46 @@ static int cmd_exec_local(int argc, char **argv) {
 
 	aicli_allowlist_t allow = {.files = files, .file_count = file_count};
 	aicli_execute_request_t req = {
-		.command = argv[i],
-		.file = NULL,
-		.idempotency = NULL,
-		.start = start,
-		.size = size,
+	    .command = argv[i],
+	    .file = NULL,
+	    .idempotency = NULL,
+	    .start = start,
+	    .size = size,
 	};
 
 	aicli_tool_result_t res;
 	aicli_execute_run(&allow, &req, &res);
-	if (res.stderr_text && res.stderr_text[0]) fprintf(stderr, "%s\n", res.stderr_text);
-	if (res.stdout_text) fwrite(res.stdout_text, 1, res.stdout_len, stdout);
-	if (res.stdout_text) free((void *)res.stdout_text);
+	if (res.stderr_text && res.stderr_text[0])
+		fprintf(stderr, "%s\n", res.stderr_text);
+	if (res.stdout_text)
+		fwrite(res.stdout_text, 1, res.stdout_len, stdout);
+	if (res.stdout_text)
+		free((void *)res.stdout_text);
 	for (int fi = 0; fi < file_count; fi++) {
 		free((void *)files[fi].path);
 	}
 
 	if (res.has_next_start) {
-		fprintf(stderr, "\n[total_bytes=%zu next_start=%zu]\n", res.total_bytes, res.next_start);
+		fprintf(stderr, "\n[total_bytes=%zu next_start=%zu]\n", res.total_bytes,
+		        res.next_start);
 	} else {
 		fprintf(stderr, "\n[total_bytes=%zu]\n", res.total_bytes);
 	}
 	return res.exit_code;
 }
 
-static void usage(FILE *out) {
+static void usage(FILE *out)
+{
 	fprintf(out,
-		"aicli - lightweight native OpenAI client\n\n"
-		"Usage:\n"
-		"  aicli chat <prompt>\n"
-		"  aicli web search <query> [--count N] [--lang xx] [--freshness day|week|month]\n"
-		"  aicli run [--auto-search] [--file PATH ...] <prompt>\n"
-	);
+	        "aicli - lightweight native OpenAI client\n\n"
+	        "Usage:\n"
+	        "  aicli chat <prompt>\n"
+	        "  aicli web search <query> [--count N] [--lang xx] [--freshness day|week|month]\n"
+	        "  aicli run [--auto-search] [--file PATH ...] <prompt>\n");
 }
 
-int aicli_cli_main(int argc, char **argv) {
+int aicli_cli_main(int argc, char **argv)
+{
 	if (argc < 2) {
 		usage(stderr);
 		return 2;
@@ -108,7 +114,8 @@ int aicli_cli_main(int argc, char **argv) {
 
 	aicli_config_t cfg;
 	if (!aicli_config_load_from_env(&cfg)) {
-		// It's OK for scaffold; real implementation will require OPENAI_API_KEY for chat/run.
+		// It's OK for scaffold; real implementation will require OPENAI_API_KEY for
+		// chat/run.
 	}
 
 	return 0;
