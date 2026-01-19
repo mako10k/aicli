@@ -25,6 +25,17 @@ test "$out" = "# ai"
 line1=$("$bin" _exec --file ../README.md "cat ../README.md | nl | head -n 1" 2>/dev/null | tr -d '\r')
 echo "$line1" | grep -q $'^\s*1\t# aicli'
 
+# pipe: tail
+last=$("$bin" _exec --file ../README.md "cat ../README.md | tail -n 1" 2>/dev/null)
+test -n "$last"
+
+# pipe: wc
+bytes=$("$bin" _exec --file ../README.md "cat ../README.md | wc -c" 2>/dev/null | tr -d '\n')
+echo "$bytes" | grep -qE '^[0-9]+$'
+
+lines=$("$bin" _exec --file ../README.md "cat ../README.md | wc -l" 2>/dev/null | tr -d '\n')
+echo "$lines" | grep -qE '^[0-9]+$'
+
 # path traversal should be rejected unless it resolves to allowed realpath
 mkdir -p tmp
 echo "X" > tmp/x.txt

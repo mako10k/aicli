@@ -92,6 +92,40 @@ static bool stage_head(const char *in, size_t in_len, size_t nlines, aicli_buf_t
 	return true;
 }
 
+static bool stage_tail(const char *in, size_t in_len, size_t nlines, aicli_buf_t *out) {
+	if (nlines == 0) return true;
+	// Find start position of the last N lines.
+	size_t lines = 0;
+	for (size_t i = in_len; i > 0; i--) {
+		if (in[i - 1] == '\n') {
+			lines++;
+			if (lines == nlines + 1) {
+				// start after this newline
+				size_t start = i;
+				return aicli_buf_append(out, in + start, in_len - start);
+			}
+		}
+	}
+	// Not enough newlines: return whole input
+	return aicli_buf_append(out, in, in_len);
+}
+
+static bool stage_wc(const char *in, size_t in_len, char mode, aicli_buf_t *out) {
+	// mode: 'l' or 'c'
+	unsigned long long v = 0;
+	if (mode == 'c') {
+		v = (unsigned long long)in_len;
+	} else if (mode == 'l') {
+		for (size_t i = 0; i < in_len; i++) if (in[i] == '\n') v++;
+	} else {
+		return false;
+	}
+	char buf[64];
+	int n = snprintf(buf, sizeof(buf), "%llu\n", v);
+	if (n < 0) return false;
+	return aicli_buf_append(out, buf, (size_t)n);
+}
+
 static size_t parse_head_n(const aicli_dsl_stage_t *st, bool *ok) {
 	*ok = true;
 	// head -n N
@@ -104,6 +138,28 @@ static size_t parse_head_n(const aicli_dsl_stage_t *st, bool *ok) {
 	}
 	*ok = false;
 	return 0;
+}
+
+static size_t parse_tail_n(const aicli_dsl_stage_t *st, bool *ok) {
+	*ok = true;
+	// tail -n N
+	if (st->argc == 1) return 10;
+	if (st->argc == 3 && strcmp(st->argv[1], "-n") == 0) {
+		char *end = NULL;
+		unsigned long v = strtoul(st->argv[2], &end, 10);
+		if (!end || *end != '\0') { *ok = false; return 0; }
+		return (size_t)v;
+	}
+	*ok = false;
+	return 0;
+}
+
+static bool parse_wc_mode(const aicli_dsl_stage_t *st, char *out_mode) {
+	// wc -l | wc -c
+	if (st->argc != 2) return false;
+	if (strcmp(st->argv[1], "-l") == 0) { *out_mode = 'l'; return true; }
+	if (strcmp(st->argv[1], "-c") == 0) { *out_mode = 'c'; return true; }
+	return false;
 }
 
 static void apply_paging(const char *data, size_t total, size_t start, size_t size,
@@ -214,6 +270,21 @@ int aicli_execute_run(const aicli_allowlist_t *allow,
 				ok = false;
 			} else {
 				ok = stage_head(cur, cur_len, nlines, &tmp1);
+			}
+		} else if (stg->kind == AICLI_CMD_TAIL) {
+			bool okn = true;
+			size_t nlines = parse_tail_n(stg, &okn);
+			if (!okn) {
+				ok = false;
+			} else {
+				ok = stage_tail(cur, cur_len, nlines, &tmp1);
+			}
+		} else if (stg->kind == AICLI_CMD_WC) {
+			char mode = 0;
+			if (!parse_wc_mode(stg, &mode)) {
+				ok = false;
+			} else {
+				ok = stage_wc(cur, cur_len, mode, &tmp1);
 			}
 		} else {
 			ok = false;
