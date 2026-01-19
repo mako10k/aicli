@@ -402,9 +402,9 @@ static void exec_job_main(void *arg)
 	// Optional debug: show allowlisted paths for troubleshooting.
 	if (j && j->allow && j->allow->files && j->allow->file_count > 0) {
 		// No cfg pointer here; keep it quiet by default.
-		// Intentionally not printing unless AICLI_DEBUG_ALLOWLIST=1.
-		const char *env = getenv("AICLI_DEBUG_ALLOWLIST");
-		if (env && env[0] == '1') {
+		// Intentionally not printing unless explicitly enabled.
+		const char *env = getenv("AICLI_DEBUG_FUNCTION_CALL");
+		if (env && env[0] != '\0') {
 			fprintf(stderr, "[debug:execute] allowlist file_count=%d\n", j->allow->file_count);
 			for (int i = 0; i < j->allow->file_count; i++) {
 				fprintf(stderr, "[debug:execute] allow[%d]=%s\n", i, safe_str(j->allow->files[i].path));
@@ -620,16 +620,50 @@ static int collect_execute_calls(yyjson_val *root,
 		jobs[n].done = false;
 		memset(&jobs[n].res, 0, sizeof(jobs[n].res));
 
-		if (parse_execute_arguments(args, &jobs[n].req) != 0)
+		// IMPORTANT: "arguments" is nested under the response yyjson_doc.
+		// We must not keep pointers into that doc after it is freed.
+		// Deep-copy the args payload into its own doc so strings remain valid
+		// long enough to duplicate them for worker threads.
+		yyjson_doc *adoc = NULL;
+		if (yyjson_is_str(args)) {
+			// Common shape: arguments is a JSON string.
+			const char *s = yyjson_get_str(args);
+			if (s && s[0])
+				adoc = yyjson_read(s, strlen(s), 0);
+		} else if (yyjson_is_obj(args)) {
+			// Less common shape: arguments is an object.
+			// yyjson_write() takes a doc, not a val; wrap via a temporary doc.
+			yyjson_mut_doc *md = yyjson_mut_doc_new(NULL);
+			if (md) {
+				yyjson_mut_val *rootv = yyjson_val_mut_copy(md, args);
+				if (rootv) {
+					yyjson_mut_doc_set_root(md, rootv);
+					char *astr = yyjson_mut_write(md, 0, NULL);
+					if (astr && astr[0])
+						adoc = yyjson_read(astr, strlen(astr), 0);
+					free(astr);
+				}
+				yyjson_mut_doc_free(md);
+			}
+		}
+		if (!adoc)
 			continue;
+		yyjson_val *aroot = yyjson_doc_get_root(adoc);
+		if (parse_execute_arguments(aroot, &jobs[n].req) != 0) {
+			yyjson_doc_free(adoc);
+			continue;
+		}
 		if (!jobs[n].req.command || !jobs[n].req.command[0])
 			continue;
 		// The parsed strings point into the yyjson_doc; copy them so they stay valid
 		// after we free the response document and while worker threads run.
 		if (dup_execute_request_strings(&jobs[n].req) != 0) {
+			yyjson_doc_free(adoc);
 			free_execute_request_owned(&jobs[n].req);
 			continue;
 		}
+		// args doc no longer needed once we've duplicated strings.
+		yyjson_doc_free(adoc);
 		// Keep a stable copy beyond the yyjson_doc lifetime.
 		call_ids[n] = dup_cstr(yyjson_get_str(call_id));
 		n++;

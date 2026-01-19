@@ -9,6 +9,7 @@
 
 #include "aicli.h"
 #include "aicli_config.h"
+#include "aicli_config_file.h"
 #include "auto_search.h"
 #include "brave_search.h"
 #include "google_search.h"
@@ -356,14 +357,120 @@ static void usage(FILE *out)
 	        "  aicli web search <query> [--count N] [--lang xx] [--freshness day|week|month] [--max-title N] [--max-url N] [--max-snippet N] [--width N] [--raw]\n"
 	        "  aicli run [--file PATH ...] [--turns N] [--max-tool-calls N] [--tool-threads N]\n"
 	        "           [--disable-all-tools] [--available-tools TOOL[,TOOL...]] [--force-tool TOOL]\n"
+	        "           [--config PATH] [--no-config]\n"
 	        "           [--debug-all[=LEVEL]] [--debug-api[=LEVEL]] [--debug-function-call[=LEVEL]] [--auto-search] <prompt>\n"
 	        "  aicli --list-tools\n"
+	        "\n"
+	        "Config (highest priority wins):\n"
+	        "  1) command line options\n"
+	        "  2) environment variables\n"
+	        "  3) .aicli.json in $PWD (only if under $HOME)\n"
+	        "  4) .aicli.json in parent dirs up to $HOME\n"
+	        "  5) .aicli.json in $HOME\n"
 	        "\n"
 	        "Environment:\n"
 	        "  AICLI_SEARCH_PROVIDER=google_cse|google|brave (default: google_cse)\n"
 	        "  GOOGLE_API_KEY=...\n"
 	        "  GOOGLE_CSE_CX=...\n"
 	        "  BRAVE_API_KEY=... (when provider=brave)\n");
+}
+
+static void config_apply_env_overrides(aicli_config_t *cfg)
+{
+	if (!cfg)
+		return;
+	const char *v;
+
+	v = getenv("OPENAI_API_KEY");
+	if (v && v[0])
+		cfg->openai_api_key = v;
+	v = getenv("OPENAI_BASE_URL");
+	if (v && v[0])
+		cfg->openai_base_url = v;
+	v = getenv("AICLI_MODEL");
+	if (v && v[0])
+		cfg->model = v;
+
+	v = getenv("AICLI_SEARCH_PROVIDER");
+	if (v && v[0]) {
+		if (strcmp(v, "google") == 0 || strcmp(v, "google_cse") == 0)
+			cfg->search_provider = AICLI_SEARCH_PROVIDER_GOOGLE_CSE;
+		else if (strcmp(v, "brave") == 0)
+			cfg->search_provider = AICLI_SEARCH_PROVIDER_BRAVE;
+	}
+
+	v = getenv("GOOGLE_API_KEY");
+	if (v && v[0])
+		cfg->google_api_key = v;
+	v = getenv("GOOGLE_CSE_CX");
+	if (v && v[0])
+		cfg->google_cse_cx = v;
+	v = getenv("BRAVE_API_KEY");
+	if (v && v[0])
+		cfg->brave_api_key = v;
+}
+
+static bool config_collect_cli_flags(int argc, char **argv, const char **out_config_path,
+				     bool *out_no_config)
+{
+	if (out_config_path)
+		*out_config_path = NULL;
+	if (out_no_config)
+		*out_no_config = false;
+	if (!argv)
+		return false;
+
+	for (int i = 1; i < argc; i++) {
+		if (strcmp(argv[i], "--no-config") == 0) {
+			if (out_no_config)
+				*out_no_config = true;
+			continue;
+		}
+		if (strcmp(argv[i], "--config") == 0 && i + 1 < argc) {
+			if (out_config_path)
+				*out_config_path = argv[i + 1];
+			i++;
+			continue;
+		}
+	}
+	return true;
+}
+
+static bool load_config_with_precedence(aicli_config_t *cfg, int argc, char **argv)
+{
+	if (!cfg)
+		return false;
+	memset(cfg, 0, sizeof(*cfg));
+
+	// Base: config file (lowest among our three layers here), then env, then CLI.
+	// We'll load env first for backward compatibility, then overlay file, then re-overlay env.
+	// Finally, command-line flags (handled by callers) override at point of use.
+	(void)aicli_config_load_from_env(cfg);
+
+	const char *config_path = NULL;
+	bool no_config = false;
+	config_collect_cli_flags(argc, argv, &config_path, &no_config);
+	if (no_config)
+		return true;
+
+	aicli_config_file_t cf = {0};
+	bool found = false;
+	if (config_path && config_path[0]) {
+		cf.path = aicli_realpath_dup(config_path);
+		if (cf.path)
+			cf.dir = NULL;
+		found = (cf.path != NULL);
+	} else {
+		found = aicli_config_file_find(&cf);
+	}
+
+	if (found) {
+		// Apply file values, then re-apply env overrides to keep precedence env > file.
+		(void)aicli_config_load_from_file(cfg, &cf);
+		aicli_config_file_free(&cf);
+		config_apply_env_overrides(cfg);
+	}
+	return true;
 }
 
 static int parse_optional_level(const char *opt, const char *next, bool has_next, int default_level,
@@ -1219,35 +1326,61 @@ int aicli_cli_main(int argc, char **argv)
 		return cmd_list_tools();
 	}
 
-	if (strcmp(argv[1], "_exec") == 0) {
-		return cmd_exec_local(argc, argv);
+	// Allow global flags (e.g. --config/--no-config) before subcommands.
+	int argi = 1;
+	while (argi < argc && strncmp(argv[argi], "--", 2) == 0) {
+		if (strcmp(argv[argi], "--no-config") == 0) {
+			argi++;
+			continue;
+		}
+		if (strcmp(argv[argi], "--config") == 0 && argi + 1 < argc) {
+			argi += 2;
+			continue;
+		}
+		// Stop at unknown flag; other subcommands may parse it.
+		break;
+	}
+
+	if (argi < argc && strcmp(argv[argi], "_exec") == 0) {
+		// Pass argv starting at program name so cmd_exec_local sees the expected layout:
+		// aicli _exec --file PATH "cat PATH"
+		return cmd_exec_local(argc - (argi - 1), argv + (argi - 1));
 	}
 
 	aicli_config_t cfg;
-	if (!aicli_config_load_from_env(&cfg)) {
-		// It's OK for scaffold; real implementation will require OPENAI_API_KEY for
-		// chat/run.
+	if (!load_config_with_precedence(&cfg, argc, argv)) {
+		fprintf(stderr, "failed to load config\n");
+		return 2;
 	}
+
+	int rc = 0;
 
 	if (strcmp(argv[1], "web") == 0) {
 		if (argc >= 3 && strcmp(argv[2], "search") == 0) {
-			return cmd_web_search(argc, argv, &cfg);
+			rc = cmd_web_search(argc, argv, &cfg);
+			aicli_config_free(&cfg);
+			return rc;
 		}
 		fprintf(stderr, "unknown web subcommand\n");
+		aicli_config_free(&cfg);
 		return 2;
 	}
 
 	if (strcmp(argv[1], "chat") == 0) {
-		return cmd_chat(argc, argv, &cfg);
+		rc = cmd_chat(argc, argv, &cfg);
+		aicli_config_free(&cfg);
+		return rc;
 	}
 
 	if (strcmp(argv[1], "run") == 0) {
-		return cmd_run(argc, argv, &cfg);
+		rc = cmd_run(argc, argv, &cfg);
+		aicli_config_free(&cfg);
+		return rc;
 	}
 
 	// Stub scaffold: other subcommands will be wired in MVP implementation.
 	fprintf(stderr, "scaffold: subcommands not implemented yet (%s)\n", argv[1]);
 	fprintf(stderr, "See docs/design.md for the target spec.\n");
-
+	aicli_config_free(&cfg);
 	return 0;
 }

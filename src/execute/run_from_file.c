@@ -7,6 +7,7 @@
 #include "execute/paging.h"
 
 #include <errno.h>
+#include <stdio.h>
 #include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>
@@ -124,6 +125,11 @@ int aicli_execute_run_pipeline_from_file(const aicli_allowlist_t *allow,
 	}
 
 	const char *path = local_pipe.stages[0].argv[1];
+	{
+		const char *dbg = getenv("AICLI_DEBUG_FUNCTION_CALL");
+		if (dbg && dbg[0] != '\0')
+			fprintf(stderr, "[debug:allowlist] pipeline file_arg='%s'\n", path ? path : "(null)");
+	}
 	char *rp = aicli_realpath_dup(path);
 	if (!rp) {
 		out->stderr_text = "invalid_path";
@@ -131,6 +137,9 @@ int aicli_execute_run_pipeline_from_file(const aicli_allowlist_t *allow,
 		return 0;
 	}
 	if (!aicli_allowlist_contains(allow, rp)) {
+		const char *dbg = getenv("AICLI_DEBUG_FUNCTION_CALL");
+		if (dbg && dbg[0] != '\0')
+			fprintf(stderr, "[debug:allowlist] rejected realpath='%s'\n", rp);
 		free(rp);
 		out->stderr_text = "file_not_allowed";
 		out->exit_code = 3;

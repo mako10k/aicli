@@ -38,6 +38,33 @@ export AICLI_MODEL=gpt-4.1-mini
 
 ### Web検索（デフォルト: Google Custom Search JSON API）
 
+## 設定
+
+設定ファイル名は `.aicli.json` です。優先順位は「上ほど強い」です。
+
+1. コマンドラインオプション
+2. 環境変数
+3. カレントディレクトリの設定（ただし `$HOME` 配下の場合のみ）
+4. ホーム配下のカレント上位ディレクトリの設定（再帰的に `$HOME` まで）
+5. `$HOME` の設定
+
+`aicli run` では以下のオプションも使えます。
+
+- `--config PATH`: 設定ファイルを明示指定
+- `--no-config`: 設定ファイル探索を無効化
+
+例:
+
+```json
+{
+	"model": "gpt-5-mini",
+	"openai_base_url": "https://api.openai.com",
+	"search_provider": "google_cse",
+	"google_api_key": "...",
+	"google_cse_cx": "..."
+}
+```
+
 ```bash
 export GOOGLE_API_KEY=...
 export GOOGLE_CSE_CX=...

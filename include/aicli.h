@@ -14,6 +14,8 @@ typedef struct {
 	const char *openai_api_key;
 	const char *openai_base_url;
 	const char *model;
+	bool openai_base_url_owned;
+	bool model_owned;
 	int debug_api;
 	int debug_function_call;
 	aicli_search_provider_t search_provider;
@@ -21,9 +23,12 @@ typedef struct {
 	// Google Programmable Search Engine / Custom Search JSON API
 	const char *google_api_key;
 	const char *google_cse_cx;
+	bool google_api_key_owned;
+	bool google_cse_cx_owned;
 
 	// Brave Web Search API
 	const char *brave_api_key;
+	bool brave_api_key_owned;
 } aicli_config_t;
 
 typedef struct {

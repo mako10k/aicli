@@ -21,6 +21,7 @@ aicli_SOURCES = \
 	execute/pipeline_stages.c \
 	execute_tool_impl.c \
 	path_util.c \
+	config_file.c \
 	paging_cache.c
 
 aicli_CPPFLAGS = -I$(top_srcdir)/include -I$(top_srcdir)/vendor/yyjson $(CURL_CFLAGS)
