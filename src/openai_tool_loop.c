@@ -138,7 +138,30 @@ static int parse_execute_arguments(yyjson_val *args, aicli_execute_request_t *ou
 	if (!out)
 		return -1;
 	memset(out, 0, sizeof(*out));
-	if (!args || !yyjson_is_obj(args))
+	if (!args)
+		return 1;
+
+	// Responses API may encode arguments either as an object or as a JSON string.
+	// Accept both shapes.
+	if (yyjson_is_str(args)) {
+		const char *s = yyjson_get_str(args);
+		if (!s || !s[0])
+			return 1;
+		yyjson_doc *doc = yyjson_read(s, strlen(s), 0);
+		if (!doc)
+			return 1;
+		yyjson_val *root = yyjson_doc_get_root(doc);
+		int rc = 0;
+		if (!root || !yyjson_is_obj(root)) {
+			rc = 1;
+		} else {
+			rc = parse_execute_arguments(root, out);
+		}
+		yyjson_doc_free(doc);
+		return rc;
+	}
+
+	if (!yyjson_is_obj(args))
 		return 1;
 
 	yyjson_val *v;
@@ -277,7 +300,7 @@ static int collect_execute_calls(yyjson_val *root,
 			continue;
 
 		yyjson_val *args = yyjson_obj_get(item, "arguments");
-		if (!args || !yyjson_is_obj(args))
+		if (!args)
 			continue;
 
 		jobs[n].req = (aicli_execute_request_t){0};
@@ -287,7 +310,8 @@ static int collect_execute_calls(yyjson_val *root,
 
 		if (parse_execute_arguments(args, &jobs[n].req) != 0)
 			continue;
-		call_ids[n] = yyjson_get_str(call_id);
+		// Keep a stable copy beyond the yyjson_doc lifetime.
+		call_ids[n] = dup_cstr(yyjson_get_str(call_id));
 		n++;
 	}
 
@@ -328,21 +352,24 @@ static void debug_log_execute_calls_if_enabled(const aicli_config_t *cfg, yyjson
 		fprintf(stderr, "[debug:function_call] tool=%s call_id=%s\n", safe_str(nstr), safe_str(cid));
 
 		if (cfg->debug_function_call >= 2) {
-			// Print arguments JSON (truncated). This is potentially sensitive, so keep it bounded.
+			// Print arguments JSON (truncated). Potentially sensitive; keep bounded.
 			yyjson_val *args = yyjson_obj_get(item, "arguments");
 			if (args) {
-				// Best effort: write the args object as JSON.
-				yyjson_mut_doc *md = yyjson_mut_doc_new(NULL);
-				yyjson_mut_val *mc = yyjson_val_mut_copy(md, args);
-				if (mc) {
-					yyjson_mut_doc_set_root(md, mc);
-					char *json = yyjson_mut_write(md, 0, NULL);
-					if (json) {
-						debug_print_trunc(stderr, "[debug:function_call] arguments", json, max_bytes);
-						free(json);
+				if (yyjson_is_str(args)) {
+					debug_print_trunc(stderr, "[debug:function_call] arguments", yyjson_get_str(args), max_bytes);
+				} else {
+					yyjson_mut_doc *md = yyjson_mut_doc_new(NULL);
+					yyjson_mut_val *mc = yyjson_val_mut_copy(md, args);
+					if (mc) {
+						yyjson_mut_doc_set_root(md, mc);
+						char *json = yyjson_mut_write(md, 0, NULL);
+						if (json) {
+							debug_print_trunc(stderr, "[debug:function_call] arguments", json, max_bytes);
+							free(json);
+						}
 					}
+					yyjson_mut_doc_free(md);
 				}
-				yyjson_mut_doc_free(md);
 			}
 		}
 	}
@@ -531,7 +558,7 @@ int aicli_openai_run_with_tools(const aicli_config_t *cfg,
 		}
 
 		exec_job_t *jobs = (exec_job_t *)calloc(max_tool_calls_per_turn, sizeof(exec_job_t));
-		const char **call_ids = (const char **)calloc(max_tool_calls_per_turn, sizeof(char *));
+		char **call_ids = (char **)calloc(max_tool_calls_per_turn, sizeof(char *));
 		char **items_json = (char **)calloc(max_tool_calls_per_turn, sizeof(char *));
 		if (!jobs || !call_ids || !items_json) {
 			free(jobs);
@@ -542,9 +569,11 @@ int aicli_openai_run_with_tools(const aicli_config_t *cfg,
 		}
 
 		size_t call_count = 0;
-		(void)collect_execute_calls(root, jobs, call_ids, max_tool_calls_per_turn, &call_count);
+		(void)collect_execute_calls(root, jobs, (const char **)call_ids, max_tool_calls_per_turn, &call_count);
 		if (call_count == 0) {
 			free(jobs);
+			for (size_t k = 0; k < max_tool_calls_per_turn; k++)
+				free(call_ids[k]);
 			free(call_ids);
 			free(items_json);
 			yyjson_doc_free(doc);
@@ -567,6 +596,19 @@ int aicli_openai_run_with_tools(const aicli_config_t *cfg,
 		aicli_threadpool_drain(tp);
 		aicli_threadpool_destroy(tp);
 
+		if (cfg && debug_level_enabled(cfg->debug_function_call) && cfg->debug_function_call >= 2) {
+			size_t maxb = debug_max_bytes_for_level(cfg->debug_function_call);
+			for (size_t i = 0; i < call_count; i++) {
+				fprintf(stderr, "[debug:function_call] execute result call_id=%s exit_code=%d truncated=%d total_bytes=%zu\n",
+				        safe_str(call_ids[i]), jobs[i].res.exit_code, jobs[i].res.truncated ? 1 : 0,
+				        jobs[i].res.total_bytes);
+				if (jobs[i].res.stderr_text && jobs[i].res.stderr_text[0])
+					debug_print_trunc(stderr, "[debug:function_call] execute stderr", jobs[i].res.stderr_text, maxb);
+				if (cfg->debug_function_call >= 3 && jobs[i].res.stdout_text && jobs[i].res.stdout_text[0])
+					debug_print_trunc(stderr, "[debug:function_call] execute stdout", jobs[i].res.stdout_text, maxb);
+			}
+		}
+
 		for (size_t i = 0; i < call_count; i++) {
 			items_json[i] = build_function_call_output_item_json(call_ids[i], &jobs[i].res);
 		}
@@ -577,6 +619,7 @@ int aicli_openai_run_with_tools(const aicli_config_t *cfg,
 			if (jobs[i].res.stdout_text)
 				free((void *)jobs[i].res.stdout_text);
 			free(items_json[i]);
+			free(call_ids[i]);
 		}
 		free(items_json);
 		free(jobs);
@@ -591,8 +634,19 @@ int aicli_openai_run_with_tools(const aicli_config_t *cfg,
 		rc = aicli_openai_responses_post_raw_json(cfg->openai_api_key, cfg->openai_base_url,
 		                                       next_payload, &http);
 		free(next_payload);
-		if (rc != 0)
+		if (rc != 0) {
+			if (cfg && debug_level_enabled(cfg->debug_api)) {
+				fprintf(stderr, "[debug:api] follow-up request failed rc=%d http_status=%d body_len=%zu\n",
+				        rc, http.http_status, http.body_len);
+				if (http.body && http.body_len) {
+					size_t maxb = debug_max_bytes_for_level(cfg->debug_api);
+					if (maxb == 0)
+						maxb = 2048;
+					debug_print_trunc(stderr, "[debug:api] follow-up body", http.body, maxb);
+				}
+			}
 			break;
+		}
 		if (cfg && debug_level_enabled(cfg->debug_api))
 			fprintf(stderr, "[debug:api] follow-up response http_status=%d body_len=%zu\n", http.http_status, http.body_len);
 		if (http.http_status != 200 || !http.body || http.body_len == 0) {
