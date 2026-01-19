@@ -1,0 +1,30 @@
+Checks: >
+  -*,
+  bugprone-*,
+  clang-analyzer-*,
+  misc-unused-parameters,
+  misc-non-private-member-variables-in-classes,
+  readability-function-size,
+  readability-cognitive-complexity,
+  readability-identifier-naming
+WarningsAsErrors: ''
+HeaderFilterRegex: '^(src/|include/)'
+CheckOptions:
+  - key: readability-function-size.LineThreshold
+    value: '200'
+  - key: readability-function-size.StatementThreshold
+    value: '80'
+  - key: readability-cognitive-complexity.Threshold
+    value: '25'
+  - key: readability-identifier-naming.FunctionCase
+    value: lower_case
+  - key: readability-identifier-naming.VariableCase
+    value: lower_case
+  - key: readability-identifier-naming.ParameterCase
+    value: lower_case
+  - key: readability-identifier-naming.MacroDefinitionCase
+    value: UPPER_CASE
+  - key: readability-identifier-naming.EnumConstantCase
+    value: UPPER_CASE
+  - key: readability-identifier-naming.GlobalConstantCase
+    value: UPPER_CASE
