@@ -1,5 +1,7 @@
 #include "execute_tool.h"
 
+#include "buf.h"
+
 #include <errno.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -52,6 +54,82 @@ static int read_file_range(const char *path, size_t start, size_t max_bytes,
 	return 0;
 }
 
+static bool stage_nl(const char *in, size_t in_len, aicli_buf_t *out) {
+	// Simple line numbering: "     1\t..."
+	unsigned long line = 1;
+	size_t i = 0;
+	size_t line_start = 0;
+	while (i <= in_len) {
+		if (i == in_len || in[i] == '\n') {
+			char prefix[32];
+			int n = snprintf(prefix, sizeof(prefix), "%6lu\t", line);
+			if (n < 0) return false;
+			if (!aicli_buf_append(out, prefix, (size_t)n)) return false;
+			if (!aicli_buf_append(out, in + line_start, i - line_start)) return false;
+			if (i < in_len) {
+				if (!aicli_buf_append(out, "\n", 1)) return false;
+			}
+			line++;
+			line_start = i + 1;
+		}
+		i++;
+	}
+	return true;
+}
+
+static bool stage_head(const char *in, size_t in_len, size_t nlines, aicli_buf_t *out) {
+	if (nlines == 0) return true;
+	size_t lines = 0;
+	size_t i = 0;
+	while (i < in_len) {
+		if (!aicli_buf_append(out, &in[i], 1)) return false;
+		if (in[i] == '\n') {
+			lines++;
+			if (lines >= nlines) break;
+		}
+		i++;
+	}
+	return true;
+}
+
+static size_t parse_head_n(const aicli_dsl_stage_t *st, bool *ok) {
+	*ok = true;
+	// head -n N
+	if (st->argc == 1) return 10;
+	if (st->argc == 3 && strcmp(st->argv[1], "-n") == 0) {
+		char *end = NULL;
+		unsigned long v = strtoul(st->argv[2], &end, 10);
+		if (!end || *end != '\0') { *ok = false; return 0; }
+		return (size_t)v;
+	}
+	*ok = false;
+	return 0;
+}
+
+static void apply_paging(const char *data, size_t total, size_t start, size_t size,
+				 aicli_tool_result_t *out) {
+	if (start > total) start = total;
+	size_t remain = total - start;
+	size_t n = remain < size ? remain : size;
+
+	char *buf = (char *)malloc(n + 1);
+	if (!buf) {
+		out->stderr_text = "oom";
+		out->exit_code = 1;
+		return;
+	}
+	memcpy(buf, data + start, n);
+	buf[n] = '\0';
+
+	out->stdout_text = buf;
+	out->stdout_len = n;
+	out->exit_code = 0;
+	out->total_bytes = total;
+	out->truncated = (start + n) < total;
+	out->has_next_start = out->truncated;
+	out->next_start = start + n;
+}
+
 int aicli_execute_run(const aicli_allowlist_t *allow,
 				 const aicli_execute_request_t *req,
 				 aicli_tool_result_t *out) {
@@ -69,9 +147,9 @@ int aicli_execute_run(const aicli_allowlist_t *allow,
 		return 0;
 	}
 
-	// MVP: only support a single-stage "cat <FILE>".
-	if (pipe.stage_count != 1 || pipe.stages[0].kind != AICLI_CMD_CAT || pipe.stages[0].argc != 2) {
-		out->stderr_text = "mvp_only_supports: cat <FILE>";
+	// MVP2: support `cat <FILE> | nl | head -n N` (nl/head optional)
+	if (pipe.stage_count < 1 || pipe.stages[0].kind != AICLI_CMD_CAT || pipe.stages[0].argc != 2) {
+		out->stderr_text = "mvp_requires: cat <FILE>";
 		out->exit_code = 2;
 		return 0;
 	}
@@ -90,23 +168,84 @@ int aicli_execute_run(const aicli_allowlist_t *allow,
 		return 0;
 	}
 
-	char *buf = NULL;
-	size_t len = 0;
-	size_t total = 0;
-	if (read_file_range(rp, req->start, size, &buf, &len, &total) != 0) {
+	// Step 1: read whole file (bounded) into memory for now.
+	// Limit: avoid reading huge files in MVP.
+	size_t file_total = 0;
+	char *file_buf = NULL;
+	size_t file_len = 0;
+	{
+		size_t max_read = 1024 * 1024; // 1 MiB MVP limit
+		if (read_file_range(rp, 0, max_read, &file_buf, &file_len, &file_total) != 0) {
+			free(rp);
+			out->stderr_text = strerror(errno);
+			out->exit_code = 1;
+			return 0;
+		}
 		free(rp);
-		out->stderr_text = strerror(errno);
+		if (file_total > max_read) {
+			free(file_buf);
+			out->stderr_text = "file_too_large";
+			out->exit_code = 4;
+			return 0;
+		}
+	}
+
+	const char *cur = file_buf;
+	size_t cur_len = file_len;
+	aicli_buf_t tmp1, tmp2;
+	bool okbuf = aicli_buf_init(&tmp1, cur_len + 64) && aicli_buf_init(&tmp2, cur_len + 64);
+	if (!okbuf) {
+		free(file_buf);
+		out->stderr_text = "oom";
 		out->exit_code = 1;
 		return 0;
 	}
-	free(rp);
 
-	out->stdout_text = buf;
-	out->stdout_len = len;
-	out->exit_code = 0;
-	out->total_bytes = total;
-	out->truncated = (req->start + len) < total;
-	out->has_next_start = out->truncated;
-	out->next_start = req->start + len;
+	for (int si = 1; si < pipe.stage_count; si++) {
+		aicli_dsl_stage_t *stg = &pipe.stages[si];
+		tmp1.len = 0;
+		bool ok = true;
+		if (stg->kind == AICLI_CMD_NL) {
+			ok = stage_nl(cur, cur_len, &tmp1);
+		} else if (stg->kind == AICLI_CMD_HEAD) {
+			bool okn = true;
+			size_t nlines = parse_head_n(stg, &okn);
+			if (!okn) {
+				ok = false;
+			} else {
+				ok = stage_head(cur, cur_len, nlines, &tmp1);
+			}
+		} else {
+			ok = false;
+		}
+
+		if (!ok) {
+			aicli_buf_free(&tmp1);
+			aicli_buf_free(&tmp2);
+			free(file_buf);
+			out->stderr_text = "mvp_unsupported_stage";
+			out->exit_code = 2;
+			return 0;
+		}
+
+		// swap buffers: tmp1 becomes current
+		tmp2.len = 0;
+		if (!aicli_buf_append(&tmp2, tmp1.data, tmp1.len)) {
+			aicli_buf_free(&tmp1);
+			aicli_buf_free(&tmp2);
+			free(file_buf);
+			out->stderr_text = "oom";
+			out->exit_code = 1;
+			return 0;
+		}
+		cur = tmp2.data;
+		cur_len = tmp2.len;
+	}
+
+	apply_paging(cur, cur_len, req->start, size, out);
+
+	aicli_buf_free(&tmp1);
+	aicli_buf_free(&tmp2);
+	free(file_buf);
 	return 0;
 }

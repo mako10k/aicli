@@ -21,6 +21,10 @@ fi
 out=$("$bin" _exec --file ../README.md "cat ../README.md" 2>/dev/null | head -c 4)
 test "$out" = "# ai"
 
+# pipe: nl + head
+line1=$("$bin" _exec --file ../README.md "cat ../README.md | nl | head -n 1" 2>/dev/null | tr -d '\r')
+echo "$line1" | grep -q $'^\s*1\t# aicli'
+
 # path traversal should be rejected unless it resolves to allowed realpath
 mkdir -p tmp
 echo "X" > tmp/x.txt

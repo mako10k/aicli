@@ -5,6 +5,7 @@ aicli_SOURCES = \
 	cli.c \
 	config.c \
 	brave_search.c \
+	buf.c \
 	execute_dsl.c \
 	execute_tool_impl.c \
 	path_util.c \
