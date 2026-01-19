@@ -10,6 +10,7 @@ aicli_SOURCES = \
 	execute/allowlist.c \
 	execute/dispatch.c \
 	execute/file_reader.c \
+	execute/run_from_file.c \
 	execute/paging.c \
 	execute/pipeline_stages.c \
 	execute_tool_impl.c \
