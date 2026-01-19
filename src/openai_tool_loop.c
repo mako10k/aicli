@@ -36,16 +36,16 @@ static char *build_execute_tool_json(void)
 	yyjson_mut_val *tool = yyjson_mut_obj(doc);
 	yyjson_mut_arr_add_val(arr, tool);
 	yyjson_mut_obj_add_str(doc, tool, "type", "function");
+		yyjson_mut_obj_add_str(doc, tool, "name", "execute");
 
-	yyjson_mut_val *fn = yyjson_mut_obj(doc);
-	yyjson_mut_obj_add_val(doc, tool, "function", fn);
-	yyjson_mut_obj_add_str(doc, fn, "name", "execute");
-	yyjson_mut_obj_add_str(doc, fn, "description",
+		yyjson_mut_val *fn = yyjson_mut_obj(doc);
+		yyjson_mut_obj_add_val(doc, tool, "function", fn);
+		yyjson_mut_obj_add_str(doc, fn, "description",
 	                      "Read-only restricted file access via a safe DSL."
 	                      " Use for reading allowlisted local files.");
 
 	yyjson_mut_val *params = yyjson_mut_obj(doc);
-	yyjson_mut_obj_add_val(doc, fn, "parameters", params);
+		yyjson_mut_obj_add_val(doc, fn, "parameters", params);
 	yyjson_mut_obj_add_str(doc, params, "type", "object");
 
 	yyjson_mut_val *props = yyjson_mut_obj(doc);
@@ -166,14 +166,38 @@ static char *extract_first_output_text(yyjson_val *root)
 		yyjson_val *item = yyjson_arr_get(out, idx);
 		if (!item || !yyjson_is_obj(item))
 			continue;
+
+		// Newer Responses shape:
+		// output[]: {type:"message", content:[{type:"output_text", text:"..."}, ...]}
+		yyjson_val *content = yyjson_obj_get(item, "content");
+		if (content && yyjson_is_arr(content)) {
+			size_t ci, cmax = yyjson_arr_size(content);
+			for (ci = 0; ci < cmax; ci++) {
+				yyjson_val *citem = yyjson_arr_get(content, ci);
+				if (!citem || !yyjson_is_obj(citem))
+					continue;
+				yyjson_val *ctype = yyjson_obj_get(citem, "type");
+				if (!ctype || !yyjson_is_str(ctype))
+					continue;
+				const char *ct = yyjson_get_str(ctype);
+				if (!ct || strcmp(ct, "output_text") != 0)
+					continue;
+				yyjson_val *text = yyjson_obj_get(citem, "text");
+				if (text && yyjson_is_str(text))
+					return dup_cstr(yyjson_get_str(text));
+			}
+		}
+
+		// Backward-compatible fallback:
+		// output[] item itself is {type:"output_text", text:"..."}
 		yyjson_val *type = yyjson_obj_get(item, "type");
-		if (!type || !yyjson_is_str(type))
-			continue;
-		const char *t = yyjson_get_str(type);
-		if (t && strcmp(t, "output_text") == 0) {
-			yyjson_val *text = yyjson_obj_get(item, "text");
-			if (text && yyjson_is_str(text))
-				return dup_cstr(yyjson_get_str(text));
+		if (type && yyjson_is_str(type)) {
+			const char *t = yyjson_get_str(type);
+			if (t && strcmp(t, "output_text") == 0) {
+				yyjson_val *text = yyjson_obj_get(item, "text");
+				if (text && yyjson_is_str(text))
+					return dup_cstr(yyjson_get_str(text));
+			}
 		}
 	}
 	return NULL;
@@ -370,6 +394,21 @@ int aicli_openai_run_with_tools(const aicli_config_t *cfg,
 		free(tools_json);
 		return rc;
 	}
+	if (http.http_status != 200 || !http.body || http.body_len == 0) {
+		fprintf(stderr, "openai http_status=%d\n", http.http_status);
+		if (http.body && http.body_len) {
+			size_t n = http.body_len;
+			if (n > 2048)
+				n = 2048;
+			fwrite(http.body, 1, n, stderr);
+			fputc('\n', stderr);
+			if (n < http.body_len)
+				fprintf(stderr, "... (truncated, %zu bytes total)\n", http.body_len);
+		}
+		aicli_openai_http_response_free(&http);
+		free(tools_json);
+		return 2;
+	}
 
 	for (size_t turn = 0; turn < max_turns; turn++) {
 		yyjson_doc *doc = yyjson_read(http.body, http.body_len, 0);
@@ -460,5 +499,5 @@ int aicli_openai_run_with_tools(const aicli_config_t *cfg,
 
 	aicli_openai_http_response_free(&http);
 	free(tools_json);
-	return 0;
+	return 2;
 }

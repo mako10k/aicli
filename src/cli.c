@@ -742,7 +742,9 @@ static int cmd_run(int argc, char **argv, const aicli_config_t *cfg)
 	}
 
 	free(final_text);
-	return 0;
+	// Should be unreachable: openai_tool_loop returns non-zero if it can't extract output.
+	fprintf(stderr, "openai response had no output_text\n");
+	return 2;
 }
 
 static int cmd_web_search(int argc, char **argv, const aicli_config_t *cfg)
