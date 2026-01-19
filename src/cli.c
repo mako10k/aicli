@@ -565,6 +565,14 @@ static int cmd_run(int argc, char **argv, const aicli_config_t *cfg)
 		}
 		if (strcmp(argv[i], "--force-tool") == 0 && i + 1 < argc) {
 			force_tool = argv[i + 1];
+			// Responses API currently supports tool_choice: none|auto|required.
+			if (!(strcmp(force_tool, "none") == 0 || strcmp(force_tool, "auto") == 0 ||
+			      strcmp(force_tool, "required") == 0)) {
+				fprintf(stderr,
+				        "invalid --force-tool value: %s (supported: none|auto|required)\n",
+				        force_tool);
+				return 2;
+			}
 			i += 2;
 			continue;
 		}

@@ -10,6 +10,9 @@ typedef struct {
 
 typedef struct {
 	int http_status;
+	// Parsed Retry-After header if present (seconds). -1 means not present/unknown.
+	// Note: This is best-effort parsing. The HTTP layer uses it for 429 backoff.
+	int retry_after_seconds;
 	char *body;
 	size_t body_len;
 	char error[256];

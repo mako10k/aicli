@@ -76,8 +76,11 @@ static char *build_execute_tool_json(void)
 		yyjson_mut_val *fn = yyjson_mut_obj(doc);
 		yyjson_mut_obj_add_val(doc, tool, "function", fn);
 		yyjson_mut_obj_add_str(doc, fn, "description",
-	                      "Read-only restricted file access via a safe DSL."
-	                      " Use for reading allowlisted local files.");
+		                      "Read-only restricted file access via a safe DSL."
+		                      " Use ONLY for reading allowlisted local files."
+		                      " MUST provide 'command'."
+		                      " Examples: 'cat README.md', 'head -n 80 README.md', 'sed -n 1,120p README.md'."
+		                      " Do NOT use a shell; do NOT use pipes/redirections/globs; keep it simple and safe.");
 
 	yyjson_mut_val *params = yyjson_mut_obj(doc);
 		yyjson_mut_obj_add_val(doc, fn, "parameters", params);
@@ -89,7 +92,7 @@ static char *build_execute_tool_json(void)
 	yyjson_mut_val *p_command = yyjson_mut_obj(doc);
 	yyjson_mut_obj_add_str(doc, p_command, "type", "string");
 	yyjson_mut_obj_add_str(doc, p_command, "description",
-	                      "Restricted pipeline DSL command (e.g. 'cat <FILE>').");
+	                      "REQUIRED. Restricted pipeline DSL command, e.g. 'cat README.md' or 'head -n 80 README.md'.");
 	yyjson_mut_obj_add_val(doc, props, "command", p_command);
 
 	yyjson_mut_val *p_file = yyjson_mut_obj(doc);
@@ -203,6 +206,36 @@ static yyjson_val *find_output_array(yyjson_val *root)
 	return NULL;
 }
 
+static const char *find_first_execute_call_id(yyjson_val *root)
+{
+	yyjson_val *out = find_output_array(root);
+	if (!out)
+		return NULL;
+
+	size_t idx, max = yyjson_arr_size(out);
+	for (idx = 0; idx < max; idx++) {
+		yyjson_val *item = yyjson_arr_get(out, idx);
+		if (!item || !yyjson_is_obj(item))
+			continue;
+		yyjson_val *type = yyjson_obj_get(item, "type");
+		if (!type || !yyjson_is_str(type))
+			continue;
+		const char *t = yyjson_get_str(type);
+		if (!t || strcmp(t, "function_call") != 0)
+			continue;
+		yyjson_val *name = yyjson_obj_get(item, "name");
+		if (!name || !yyjson_is_str(name))
+			continue;
+		const char *n = yyjson_get_str(name);
+		if (!n || strcmp(n, "execute") != 0)
+			continue;
+		yyjson_val *call_id = yyjson_obj_get(item, "call_id");
+		if (call_id && yyjson_is_str(call_id))
+			return yyjson_get_str(call_id);
+	}
+	return NULL;
+}
+
 static const char *extract_response_id(yyjson_val *root)
 {
 	if (!root || !yyjson_is_obj(root))
@@ -310,6 +343,8 @@ static int collect_execute_calls(yyjson_val *root,
 
 		if (parse_execute_arguments(args, &jobs[n].req) != 0)
 			continue;
+		if (!jobs[n].req.command || !jobs[n].req.command[0])
+			continue;
 		// Keep a stable copy beyond the yyjson_doc lifetime.
 		call_ids[n] = dup_cstr(yyjson_get_str(call_id));
 		n++;
@@ -318,6 +353,45 @@ static int collect_execute_calls(yyjson_val *root,
 	if (out_count)
 		*out_count = n;
 	return 0;
+}
+
+static void debug_warn_invalid_execute_calls(const aicli_config_t *cfg, yyjson_val *root)
+{
+	if (!cfg || !debug_level_enabled(cfg->debug_function_call))
+		return;
+
+	yyjson_val *out = find_output_array(root);
+	if (!out)
+		return;
+
+	size_t idx, max = yyjson_arr_size(out);
+	for (idx = 0; idx < max; idx++) {
+		yyjson_val *item = yyjson_arr_get(out, idx);
+		if (!item || !yyjson_is_obj(item))
+			continue;
+		yyjson_val *type = yyjson_obj_get(item, "type");
+		if (!type || !yyjson_is_str(type))
+			continue;
+		const char *t = yyjson_get_str(type);
+		if (!t || strcmp(t, "function_call") != 0)
+			continue;
+
+		yyjson_val *name = yyjson_obj_get(item, "name");
+		const char *nstr = (name && yyjson_is_str(name)) ? yyjson_get_str(name) : NULL;
+		if (!nstr || strcmp(nstr, "execute") != 0)
+			continue;
+
+		yyjson_val *call_id = yyjson_obj_get(item, "call_id");
+		const char *cid = (call_id && yyjson_is_str(call_id)) ? yyjson_get_str(call_id) : NULL;
+		yyjson_val *args = yyjson_obj_get(item, "arguments");
+		aicli_execute_request_t req;
+		int prc = parse_execute_arguments(args, &req);
+		if (prc != 0 || !req.command || !req.command[0]) {
+			fprintf(stderr,
+			        "[debug:function_call] WARN: execute call has missing/invalid arguments (need command). call_id=%s\n",
+			        safe_str(cid));
+		}
+	}
 }
 
 static void debug_log_execute_calls_if_enabled(const aicli_config_t *cfg, yyjson_val *root)
@@ -493,6 +567,10 @@ int aicli_openai_run_with_tools(const aicli_config_t *cfg,
 	char *tools_json = build_execute_tool_json();
 	if (!tools_json)
 		return 2;
+	if (cfg && cfg->debug_api >= 3) {
+		size_t maxb = debug_max_bytes_for_level(cfg->debug_api);
+		debug_print_trunc(stderr, "[debug:api] tools_json", tools_json, maxb);
+	}
 
 	const char *model = (cfg->model && cfg->model[0]) ? cfg->model : "gpt-4.1-mini";
 
@@ -534,12 +612,15 @@ int aicli_openai_run_with_tools(const aicli_config_t *cfg,
 		return 2;
 	}
 
+	// Fail fast on invalid tool arguments.
+
 	for (size_t turn = 0; turn < max_turns; turn++) {
 		yyjson_doc *doc = yyjson_read(http.body, http.body_len, 0);
 		if (!doc)
 			break;
 		yyjson_val *root = yyjson_doc_get_root(doc);
 		debug_log_execute_calls_if_enabled(cfg, root);
+		debug_warn_invalid_execute_calls(cfg, root);
 
 		char *final = extract_first_output_text(root);
 		if (final) {
@@ -571,13 +652,21 @@ int aicli_openai_run_with_tools(const aicli_config_t *cfg,
 		size_t call_count = 0;
 		(void)collect_execute_calls(root, jobs, (const char **)call_ids, max_tool_calls_per_turn, &call_count);
 		if (call_count == 0) {
+			const char *bad_call_id = find_first_execute_call_id(root);
+			if (bad_call_id && bad_call_id[0]) {
+				fprintf(stderr,
+				        "openai tool call invalid: execute arguments missing required 'command' (call_id=%s)\n",
+				        safe_str(bad_call_id));
+			}
 			free(jobs);
 			for (size_t k = 0; k < max_tool_calls_per_turn; k++)
 				free(call_ids[k]);
 			free(call_ids);
 			free(items_json);
 			yyjson_doc_free(doc);
-			break;
+			aicli_openai_http_response_free(&http);
+			free(tools_json);
+			return 2;
 		}
 
 		aicli_threadpool_t *tp = aicli_threadpool_create(tool_threads);
@@ -666,7 +755,6 @@ int aicli_openai_run_with_tools(const aicli_config_t *cfg,
 			break;
 		}
 	}
-
 	aicli_openai_http_response_free(&http);
 	free(tools_json);
 	return 2;
