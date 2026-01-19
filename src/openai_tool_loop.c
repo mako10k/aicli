@@ -13,6 +13,41 @@
 
 static const char *safe_str(const char *s) { return s ? s : ""; }
 
+static int debug_level_enabled(int level) { return level > 0; }
+
+static size_t debug_max_bytes_for_level(int level)
+{
+	// 1: summary, 2: normal, 3+: verbose
+	if (level <= 0)
+		return 0;
+	if (level == 1)
+		return 512;
+	if (level == 2)
+		return 2048;
+	return 8192;
+}
+
+static void debug_print_trunc(FILE *out, const char *label, const char *s, size_t max_bytes)
+{
+	if (!out || !label)
+		return;
+	if (!s)
+		s = "";
+	if (max_bytes == 0) {
+		fprintf(out, "%s: (suppressed)\n", label);
+		return;
+	}
+	size_t n = strlen(s);
+	if (n > max_bytes)
+		n = max_bytes;
+	fprintf(out, "%s (%zu bytes%s):\n", label, n, (strlen(s) > n) ? ", truncated" : "");
+	fwrite(s, 1, n, out);
+	if (strlen(s) > n)
+		fputs("\n...\n", out);
+	else
+		fputc('\n', out);
+}
+
 static char *dup_cstr(const char *s)
 {
 	if (!s)
@@ -261,6 +296,58 @@ static int collect_execute_calls(yyjson_val *root,
 	return 0;
 }
 
+static void debug_log_execute_calls_if_enabled(const aicli_config_t *cfg, yyjson_val *root)
+{
+	if (!cfg || !debug_level_enabled(cfg->debug_function_call))
+		return;
+
+	yyjson_val *out = find_output_array(root);
+	if (!out)
+		return;
+
+	size_t max_bytes = debug_max_bytes_for_level(cfg->debug_function_call);
+	if (cfg->debug_function_call == 1)
+		fprintf(stderr, "[debug:function_call] scanning response for tool calls\n");
+
+	size_t idx, max = yyjson_arr_size(out);
+	for (idx = 0; idx < max; idx++) {
+		yyjson_val *item = yyjson_arr_get(out, idx);
+		if (!item || !yyjson_is_obj(item))
+			continue;
+		yyjson_val *type = yyjson_obj_get(item, "type");
+		if (!type || !yyjson_is_str(type))
+			continue;
+		const char *t = yyjson_get_str(type);
+		if (!t || strcmp(t, "function_call") != 0)
+			continue;
+
+		yyjson_val *name = yyjson_obj_get(item, "name");
+		yyjson_val *call_id = yyjson_obj_get(item, "call_id");
+		const char *nstr = (name && yyjson_is_str(name)) ? yyjson_get_str(name) : NULL;
+		const char *cid = (call_id && yyjson_is_str(call_id)) ? yyjson_get_str(call_id) : NULL;
+		fprintf(stderr, "[debug:function_call] tool=%s call_id=%s\n", safe_str(nstr), safe_str(cid));
+
+		if (cfg->debug_function_call >= 2) {
+			// Print arguments JSON (truncated). This is potentially sensitive, so keep it bounded.
+			yyjson_val *args = yyjson_obj_get(item, "arguments");
+			if (args) {
+				// Best effort: write the args object as JSON.
+				yyjson_mut_doc *md = yyjson_mut_doc_new(NULL);
+				yyjson_mut_val *mc = yyjson_val_mut_copy(md, args);
+				if (mc) {
+					yyjson_mut_doc_set_root(md, mc);
+					char *json = yyjson_mut_write(md, 0, NULL);
+					if (json) {
+						debug_print_trunc(stderr, "[debug:function_call] arguments", json, max_bytes);
+						free(json);
+					}
+				}
+				yyjson_mut_doc_free(md);
+			}
+		}
+	}
+}
+
 static char *build_function_call_output_item_json(const char *call_id, const aicli_tool_result_t *r)
 {
 	// Build a single output item:
@@ -362,6 +449,7 @@ int aicli_openai_run_with_tools(const aicli_config_t *cfg,
                                size_t max_turns,
                                size_t max_tool_calls_per_turn,
                                size_t tool_threads,
+			       const char *tool_choice,
                                char **out_final_text)
 {
 	if (out_final_text)
@@ -388,18 +476,27 @@ int aicli_openai_run_with_tools(const aicli_config_t *cfg,
 	};
 
 	aicli_openai_http_response_t http = {0};
+	if (cfg && debug_level_enabled(cfg->debug_api)) {
+		fprintf(stderr, "[debug:api] POST /v1/responses model=%s tool_choice=%s tools=execute\n",
+		        safe_str(model), safe_str(tool_choice));
+	}
 	int rc = aicli_openai_responses_post(cfg->openai_api_key, cfg->openai_base_url,
-	                                   &req0, tools_json, NULL, &http);
+	                                   &req0, tools_json, tool_choice, &http);
 	if (rc != 0) {
 		free(tools_json);
 		return rc;
 	}
+	if (cfg && debug_level_enabled(cfg->debug_api))
+		fprintf(stderr, "[debug:api] response http_status=%d body_len=%zu\n", http.http_status, http.body_len);
 	if (http.http_status != 200 || !http.body || http.body_len == 0) {
 		fprintf(stderr, "openai http_status=%d\n", http.http_status);
 		if (http.body && http.body_len) {
 			size_t n = http.body_len;
-			if (n > 2048)
-				n = 2048;
+			size_t maxb = debug_max_bytes_for_level(cfg ? cfg->debug_api : 0);
+			if (maxb == 0)
+				maxb = 2048;
+			if (n > maxb)
+				n = maxb;
 			fwrite(http.body, 1, n, stderr);
 			fputc('\n', stderr);
 			if (n < http.body_len)
@@ -415,6 +512,7 @@ int aicli_openai_run_with_tools(const aicli_config_t *cfg,
 		if (!doc)
 			break;
 		yyjson_val *root = yyjson_doc_get_root(doc);
+		debug_log_execute_calls_if_enabled(cfg, root);
 
 		char *final = extract_first_output_text(root);
 		if (final) {
@@ -495,6 +593,24 @@ int aicli_openai_run_with_tools(const aicli_config_t *cfg,
 		free(next_payload);
 		if (rc != 0)
 			break;
+		if (cfg && debug_level_enabled(cfg->debug_api))
+			fprintf(stderr, "[debug:api] follow-up response http_status=%d body_len=%zu\n", http.http_status, http.body_len);
+		if (http.http_status != 200 || !http.body || http.body_len == 0) {
+			fprintf(stderr, "openai http_status=%d\n", http.http_status);
+			if (http.body && http.body_len) {
+				size_t n = http.body_len;
+				size_t maxb = debug_max_bytes_for_level(cfg ? cfg->debug_api : 0);
+				if (maxb == 0)
+					maxb = 2048;
+				if (n > maxb)
+					n = maxb;
+				fwrite(http.body, 1, n, stderr);
+				fputc('\n', stderr);
+				if (n < http.body_len)
+					fprintf(stderr, "... (truncated, %zu bytes total)\n", http.body_len);
+			}
+			break;
+		}
 	}
 
 	aicli_openai_http_response_free(&http);

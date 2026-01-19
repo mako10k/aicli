@@ -340,13 +340,66 @@ static void usage(FILE *out)
 	        "Usage:\n"
 	        "  aicli chat <prompt>\n"
 	        "  aicli web search <query> [--count N] [--lang xx] [--freshness day|week|month] [--max-title N] [--max-url N] [--max-snippet N] [--width N] [--raw]\n"
-	        "  aicli run [--file PATH ...] [--turns N] [--max-tool-calls N] [--tool-threads N] [--auto-search] <prompt>\n"
+	        "  aicli run [--file PATH ...] [--turns N] [--max-tool-calls N] [--tool-threads N]\n"
+	        "           [--disable-all-tools] [--available-tools TOOL[,TOOL...]] [--force-tool TOOL]\n"
+	        "           [--debug-all[=LEVEL]] [--debug-api[=LEVEL]] [--debug-function-call[=LEVEL]] [--auto-search] <prompt>\n"
+	        "  aicli --list-tools\n"
 	        "\n"
 	        "Environment:\n"
 	        "  AICLI_SEARCH_PROVIDER=google_cse|google|brave (default: google_cse)\n"
 	        "  GOOGLE_API_KEY=...\n"
 	        "  GOOGLE_CSE_CX=...\n"
 	        "  BRAVE_API_KEY=... (when provider=brave)\n");
+}
+
+static int parse_optional_level(const char *opt, const char *next, bool has_next, int default_level,
+			       int *out_level, int *out_consumed_next)
+{
+	// Supports:
+	//  --flag           => default_level
+	//  --flag=NUM       => NUM
+	//  --flag NUM       => NUM
+	// Returns 0 on success, non-zero on parse error.
+	if (!out_level || !out_consumed_next)
+		return 1;
+	*out_consumed_next = 0;
+	*out_level = default_level;
+
+	if (!opt)
+		return 1;
+
+	const char *eq = strchr(opt, '=');
+	if (eq && eq[1]) {
+		errno = 0;
+		long v = strtol(eq + 1, NULL, 10);
+		if (errno != 0 || v < 0 || v > 10)
+			return 1;
+		*out_level = (int)v;
+		return 0;
+	}
+
+	if (has_next && next && next[0] && next[0] != '-') {
+		errno = 0;
+		long v = strtol(next, NULL, 10);
+		if (errno != 0 || v < 0 || v > 10)
+			return 1;
+		*out_level = (int)v;
+		*out_consumed_next = 1;
+		return 0;
+	}
+
+	return 0;
+}
+
+static int cmd_list_tools(void)
+{
+	printf("Available tools:\n");
+	printf("  execute\n");
+	printf("\n");
+	printf("Notes:\n");
+	printf("  - execute is read-only and limited to allowlisted files.\n");
+	printf("  - Use aicli run --file PATH to allow a file for execute.\n");
+	return 0;
 }
 
 static int cmd_run(int argc, char **argv, const aicli_config_t *cfg);
@@ -438,6 +491,11 @@ static int cmd_run(int argc, char **argv, const aicli_config_t *cfg)
 	aicli_allowed_file_t files[32];
 	int file_count = 0;
 	bool auto_search = false;
+	const char *available_tools = NULL;
+	const char *force_tool = NULL;
+	int disable_all_tools = 0;
+	int debug_api = 0;
+	int debug_function_call = 0;
 	size_t turns = 4;
 	size_t max_tool_calls = 8;
 	size_t tool_threads = 1;
@@ -493,6 +551,59 @@ static int cmd_run(int argc, char **argv, const aicli_config_t *cfg)
 			}
 			tool_threads = (size_t)v;
 			i += 2;
+			continue;
+		}
+		if (strcmp(argv[i], "--disable-all-tools") == 0) {
+			disable_all_tools = 1;
+			i += 1;
+			continue;
+		}
+		if (strcmp(argv[i], "--available-tools") == 0 && i + 1 < argc) {
+			available_tools = argv[i + 1];
+			i += 2;
+			continue;
+		}
+		if (strcmp(argv[i], "--force-tool") == 0 && i + 1 < argc) {
+			force_tool = argv[i + 1];
+			i += 2;
+			continue;
+		}
+		if (strcmp(argv[i], "--debug-api") == 0 || strncmp(argv[i], "--debug-api=", 12) == 0) {
+			int level = 1;
+			int consumed = 0;
+			if (parse_optional_level(argv[i], (i + 1 < argc) ? argv[i + 1] : NULL, (i + 1 < argc), 1,
+						 &level, &consumed) != 0) {
+				fprintf(stderr, "invalid --debug-api level (0..10)\n");
+				return 2;
+			}
+			debug_api = level;
+			i += 1 + consumed;
+			continue;
+		}
+		if (strcmp(argv[i], "--debug-function-call") == 0 ||
+		    strncmp(argv[i], "--debug-function-call=", 22) == 0) {
+			int level = 1;
+			int consumed = 0;
+			if (parse_optional_level(argv[i], (i + 1 < argc) ? argv[i + 1] : NULL, (i + 1 < argc), 1,
+						 &level, &consumed) != 0) {
+				fprintf(stderr, "invalid --debug-function-call level (0..10)\n");
+				return 2;
+			}
+			debug_function_call = level;
+			i += 1 + consumed;
+			continue;
+		}
+		if (strcmp(argv[i], "--debug-all") == 0 || strncmp(argv[i], "--debug-all=", 12) == 0) {
+			int level = 1;
+			int consumed = 0;
+			if (parse_optional_level(argv[i], (i + 1 < argc) ? argv[i + 1] : NULL, (i + 1 < argc), 1,
+						 &level, &consumed) != 0) {
+				fprintf(stderr, "invalid --debug-all level (0..10)\n");
+				return 2;
+			}
+			debug_api = level;
+			debug_function_call = level;
+			i += 1 + consumed;
 			continue;
 		}
 		if (strcmp(argv[i], "--auto-search") == 0) {
@@ -722,8 +833,31 @@ static int cmd_run(int argc, char **argv, const aicli_config_t *cfg)
 	aicli_allowlist_t allow = {.files = files, .file_count = file_count};
 	char *final_text = NULL;
 	const char *to_send = augmented_prompt ? augmented_prompt : prompt;
-	int rc = aicli_openai_run_with_tools(cfg, &allow, to_send, turns, max_tool_calls,
-	                                   tool_threads, &final_text);
+	// tool_choice semantics (Responses API): "none" disables, "auto" lets model decide,
+	// or force a specific tool by name.
+	const char *tool_choice = NULL;
+	if (disable_all_tools)
+		tool_choice = "none";
+	else if (force_tool && force_tool[0])
+		tool_choice = force_tool;
+
+	// available_tools: for now we only support "execute".
+	if (available_tools && available_tools[0]) {
+		if (strcmp(available_tools, "execute") != 0) {
+			fprintf(stderr, "unsupported --available-tools (only: execute)\n");
+			free(augmented_prompt);
+			for (int fi = 0; fi < file_count; fi++)
+				free((void *)files[fi].path);
+			return 2;
+		}
+	}
+
+	aicli_config_t cfg_local;
+	memcpy(&cfg_local, cfg, sizeof(cfg_local));
+	cfg_local.debug_api = debug_api;
+	cfg_local.debug_function_call = debug_function_call;
+	int rc = aicli_openai_run_with_tools(&cfg_local, &allow, to_send, turns, max_tool_calls,
+	                                   tool_threads, tool_choice, &final_text);
 	free(augmented_prompt);
 	for (int fi = 0; fi < file_count; fi++)
 		free((void *)files[fi].path);
@@ -1033,6 +1167,10 @@ int aicli_cli_main(int argc, char **argv)
 	if (strcmp(argv[1], "--help") == 0 || strcmp(argv[1], "-h") == 0) {
 		usage(stdout);
 		return 0;
+	}
+
+	if (strcmp(argv[1], "--list-tools") == 0) {
+		return cmd_list_tools();
 	}
 
 	if (strcmp(argv[1], "_exec") == 0) {

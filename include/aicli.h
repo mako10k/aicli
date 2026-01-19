@@ -14,6 +14,8 @@ typedef struct {
 	const char *openai_api_key;
 	const char *openai_base_url;
 	const char *model;
+	int debug_api;
+	int debug_function_call;
 	aicli_search_provider_t search_provider;
 
 	// Google Programmable Search Engine / Custom Search JSON API

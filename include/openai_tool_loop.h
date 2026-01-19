@@ -25,6 +25,7 @@ int aicli_openai_run_with_tools(const aicli_config_t *cfg,
                                size_t max_turns,
                                size_t max_tool_calls_per_turn,
                                size_t tool_threads,
+                   const char *tool_choice,
                                char **out_final_text);
 
 #ifdef __cplusplus

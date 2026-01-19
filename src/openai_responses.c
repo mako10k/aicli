@@ -195,6 +195,13 @@ int aicli_openai_responses_post(const char *api_key, const char *base_url,
 	headers = curl_slist_append(headers, "Content-Type: application/json");
 	headers = curl_slist_append(headers, "Accept: application/json");
 
+	// Best-effort debug: do not print secrets.
+	if (req && req->model && req->model[0]) {
+		// Intentionally do not print Authorization header.
+		// We also expect payload to be UTF-8 JSON.
+		// (The caller controls enabling debug via cfg; currently surfaced by CLI only.)
+	}
+
 	curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
 	curl_easy_setopt(curl, CURLOPT_URL, url);
 	curl_easy_setopt(curl, CURLOPT_POST, 1L);

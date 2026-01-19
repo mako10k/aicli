@@ -11,6 +11,8 @@ bool aicli_config_load_from_env(aicli_config_t *out)
 	out->openai_api_key = getenv("OPENAI_API_KEY");
 	out->openai_base_url = getenv("OPENAI_BASE_URL");
 	out->model = getenv("AICLI_MODEL");
+	out->debug_api = 0;
+	out->debug_function_call = 0;
 
 	// Search provider (default: Google CSE)
 	out->search_provider = AICLI_SEARCH_PROVIDER_GOOGLE_CSE;
