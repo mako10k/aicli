@@ -4,8 +4,6 @@ set -euo pipefail
 bin=""
 if [[ -x "${AICLI_BIN:-}" ]]; then
 	bin="$AICLI_BIN"
-elif [[ -x "./bin/aicli" ]]; then
-	bin="./bin/aicli"
 elif [[ -x "../src/aicli" ]]; then
 	bin="../src/aicli"
 else

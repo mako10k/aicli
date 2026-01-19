@@ -340,13 +340,91 @@ static void usage(FILE *out)
 	        "Usage:\n"
 	        "  aicli chat <prompt>\n"
 	        "  aicli web search <query> [--count N] [--lang xx] [--freshness day|week|month] [--max-title N] [--max-url N] [--max-snippet N] [--width N] [--raw]\n"
+	        "  aicli run [--file PATH ...] [--turns N] [--max-tool-calls N] [--tool-threads N] [--auto-search] <prompt>\n"
 	        "\n"
 	        "Environment:\n"
 	        "  AICLI_SEARCH_PROVIDER=google_cse|google|brave (default: google_cse)\n"
 	        "  GOOGLE_API_KEY=...\n"
 	        "  GOOGLE_CSE_CX=...\n"
-	        "  BRAVE_API_KEY=... (when provider=brave)\n"
-	        "  aicli run [--file PATH ...] [--turns N] [--max-tool-calls N] [--tool-threads N] [--auto-search] <prompt>\n");
+	        "  BRAVE_API_KEY=... (when provider=brave)\n");
+}
+
+static int cmd_run(int argc, char **argv, const aicli_config_t *cfg);
+
+static int cmd_chat(int argc, char **argv, const aicli_config_t *cfg)
+{
+	// aicli chat <prompt>
+	if (argc < 3) {
+		fprintf(stderr, "missing prompt\n");
+		return 2;
+	}
+
+	// Reuse the run pipeline but force tools off by default.
+	// Equivalent to: aicli run --turns 1 --max-tool-calls 1 --tool-threads 1 <prompt>
+	char *args[12];
+	int n = 0;
+	args[n++] = argv[0];
+	args[n++] = "run";
+	args[n++] = "--turns";
+	args[n++] = "1";
+	args[n++] = "--max-tool-calls";
+	args[n++] = "1";
+	args[n++] = "--tool-threads";
+	args[n++] = "1";
+	args[n++] = argv[2];
+	args[n] = NULL;
+	return cmd_run(n, args, cfg);
+}
+
+static const char *first_nonempty_env(const char *a, const char *b, const char *c)
+{
+	const char *v = NULL;
+	if (a)
+		v = getenv(a);
+	if (v && v[0])
+		return v;
+	if (b)
+		v = getenv(b);
+	if (v && v[0])
+		return v;
+	if (c)
+		v = getenv(c);
+	if (v && v[0])
+		return v;
+	return NULL;
+}
+
+static int locale_to_google_lr(const char *locale, char out[32])
+{
+	if (!out)
+		return 1;
+	out[0] = '\0';
+	if (!locale || !locale[0])
+		return 1;
+
+	// Accept formats like: ja_JP.UTF-8, ja-JP, ja, C, POSIX
+	if (strcmp(locale, "C") == 0 || strcmp(locale, "POSIX") == 0)
+		return 1;
+
+	const char *p = locale;
+	char lang2[3] = {0};
+	int n = 0;
+	while (*p && n < 2) {
+		char ch = *p;
+		if (ch == '_' || ch == '-' || ch == '.')
+			break;
+		if ((ch >= 'A' && ch <= 'Z'))
+			ch = (char)(ch - 'A' + 'a');
+		if (!(ch >= 'a' && ch <= 'z'))
+			return 1;
+		lang2[n++] = ch;
+		p++;
+	}
+	if (n != 2)
+		return 1;
+
+	snprintf(out, 32, "lang_%s", lang2);
+	return 0;
 }
 
 static int cmd_run(int argc, char **argv, const aicli_config_t *cfg)
@@ -772,6 +850,11 @@ static int cmd_web_search(int argc, char **argv, const aicli_config_t *cfg)
 		return 2;
 	}
 
+	// Language precedence: --lang > system locale > unset
+	const char *effective_lang = lang;
+	if (!effective_lang || !effective_lang[0])
+		effective_lang = first_nonempty_env("LC_ALL", "LC_MESSAGES", "LANG");
+
 	if (width == 0)
 		width = detect_tty_width_or_default(80);
 
@@ -780,10 +863,17 @@ static int cmd_web_search(int argc, char **argv, const aicli_config_t *cfg)
 	int is_brave = (cfg->search_provider == AICLI_SEARCH_PROVIDER_BRAVE);
 
 	if (is_google) {
+		char lr_buf[32];
+		const char *lr = NULL;
+		if (effective_lang && effective_lang[0]) {
+			if (locale_to_google_lr(effective_lang, lr_buf) == 0)
+				lr = lr_buf;
+		}
+
 		aicli_google_response_t res;
 		int rc = aicli_google_cse_search(cfg->google_api_key, cfg->google_cse_cx,
 		                               query, count,
-		                               NULL, &res);
+		                               lr, &res);
 		if (rc != 0) {
 			fprintf(stderr, "google cse search failed: %s\n", res.error[0] ? res.error : "unknown");
 			aicli_google_response_free(&res);
@@ -959,6 +1049,10 @@ int aicli_cli_main(int argc, char **argv)
 		}
 		fprintf(stderr, "unknown web subcommand\n");
 		return 2;
+	}
+
+	if (strcmp(argv[1], "chat") == 0) {
+		return cmd_chat(argc, argv, &cfg);
 	}
 
 	if (strcmp(argv[1], "run") == 0) {

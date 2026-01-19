@@ -33,7 +33,7 @@ make
 ```bash
 export OPENAI_API_KEY=... 
 export AICLI_MODEL=gpt-4.1-mini
-./bin/aicli chat "hello"
+./src/aicli chat "hello"
 ```
 
 ### Web検索（デフォルト: Google Custom Search JSON API）
@@ -41,14 +41,12 @@ export AICLI_MODEL=gpt-4.1-mini
 ```bash
 export GOOGLE_API_KEY=...
 export GOOGLE_CSE_CX=...
-./bin/aicli web search "OpenAI native client C" --count 5 --lang ja --freshness week
+./src/aicli web search "OpenAI native client C" --count 5 --lang ja --freshness week
 
-Brave に切り替える場合:
-
-```bash
+# Brave に切り替える場合:
 export AICLI_SEARCH_PROVIDER=brave
 export BRAVE_API_KEY=...
-./bin/aicli web search "OpenAI native client C" --count 5 --lang ja --freshness week
+./src/aicli web search "OpenAI native client C" --count 5 --lang ja --freshness week
 ```
 ```
 
@@ -58,7 +56,7 @@ export BRAVE_API_KEY=...
 export OPENAI_API_KEY=...
 export GOOGLE_API_KEY=...
 export GOOGLE_CSE_CX=...
-./bin/aicli run --auto-search --file README.md "このリポジトリの要点をまとめて"
+./src/aicli run --auto-search --file README.md "このリポジトリの要点をまとめて"
 ```
 
 ## ドキュメント
