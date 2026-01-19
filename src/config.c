@@ -1,3 +1,4 @@
+#include "aicli.h"
 #include "config.h"
 
 #include <stdlib.h>

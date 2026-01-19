@@ -8,9 +8,11 @@ AC_PROG_CC
 # libcurl (required)
 PKG_CHECK_MODULES([CURL],[libcurl])
 
-# yyjson: header check (required for future JSON handling)
-AC_CHECK_HEADERS([yyjson.h], [], [
-  AC_MSG_ERROR([yyjson.h not found. Install yyjson development headers or vendor yyjson.h into an include path.])
+# yyjson: header check (optional for now; required once JSON-based features are implemented)
+AC_CHECK_HEADERS([yyjson.h], [have_yyjson=yes], [have_yyjson=no])
+AM_CONDITIONAL([HAVE_YYJSON], [test "x$have_yyjson" = "xyes"])
+AS_IF([test "x$have_yyjson" = "xno"], [
+  AC_MSG_WARN([yyjson.h not found: OpenAI/Brave JSON features will be disabled until provided.])
 ])
 
 AC_CONFIG_FILES([

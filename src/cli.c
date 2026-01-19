@@ -4,6 +4,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "aicli.h"
 #include "config.h"
 #include "execute_tool.h"
 
