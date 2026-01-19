@@ -8,6 +8,7 @@ aicli_SOURCES = \
 	buf.c \
 	execute_dsl.c \
 	execute/allowlist.c \
+	execute/dispatch.c \
 	execute/file_reader.c \
 	execute/paging.c \
 	execute/pipeline_stages.c \
