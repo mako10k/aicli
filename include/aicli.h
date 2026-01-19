@@ -5,10 +5,22 @@
 
 #define AICLI_MAX_TOOL_BYTES 4096
 
+typedef enum {
+	AICLI_SEARCH_PROVIDER_GOOGLE_CSE = 0,
+	AICLI_SEARCH_PROVIDER_BRAVE = 1,
+} aicli_search_provider_t;
+
 typedef struct {
 	const char *openai_api_key;
 	const char *openai_base_url;
 	const char *model;
+	aicli_search_provider_t search_provider;
+
+	// Google Programmable Search Engine / Custom Search JSON API
+	const char *google_api_key;
+	const char *google_cse_cx;
+
+	// Brave Web Search API
 	const char *brave_api_key;
 } aicli_config_t;
 

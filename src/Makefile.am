@@ -4,8 +4,12 @@ aicli_SOURCES = \
 	main.c \
 	cli.c \
 	config.c \
+	auto_search.c \
 	openai_responses.c \
 	brave_search.c \
+	google_search.c \
+	openai_tool_loop.c \
+	threadpool.c \
 	../vendor/yyjson/yyjson.c \
 	buf.c \
 	execute_dsl.c \
@@ -22,3 +26,7 @@ aicli_SOURCES = \
 aicli_CPPFLAGS = -I$(top_srcdir)/include -I$(top_srcdir)/vendor/yyjson $(CURL_CFLAGS)
 
 aicli_LDADD = $(CURL_LIBS)
+
+aicli_CFLAGS = $(PTHREAD_CFLAGS)
+
+aicli_LDADD += $(PTHREAD_LIBS)

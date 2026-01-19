@@ -4,7 +4,7 @@
 - Cで実装された軽量なネイティブCLI
 - OpenAI Responses API の Function Calling を利用
 - 限定シェル相当のツール `execute` を内蔵（read-only + パイプ + ページング）
-- Web検索は Brave Search API を利用し、`aicli web search` で明示実行も `aicli run --auto-search` で自動実行も可能
+- Web検索は provider 切替（デフォルト: Google Programmable Search Engine / Custom Search JSON API）。`aicli web search` で明示実行も `aicli run --auto-search` で自動実行も可能
 - ローカルファイル読取は **CLI引数で指定したファイルのみ**
 
 ## 非ゴール
@@ -25,11 +25,16 @@
   - `--file PATH`（複数可） 許可ファイルとして登録（この時点では読まない）
 
 ### `aicli web search`
-- 目的: Brave Search API で検索し、整形結果を返す（jq不要）
+- 目的: Web検索（providerに応じて Google CSE / Brave）を行い、整形結果を返す（jq不要）
 - 例:
   - `aicli web search "query" --count 5 --lang ja --freshness week`
 - 環境変数:
-  - `BRAVE_API_KEY` 必須
+  - `AICLI_SEARCH_PROVIDER`（任意）: `google_cse|google|brave`（既定: `google_cse`）
+  - Google CSE（既定 provider）:
+    - `GOOGLE_API_KEY` 必須
+    - `GOOGLE_CSE_CX` 必須
+  - Brave（provider=brave の場合）:
+    - `BRAVE_API_KEY` 必須
 
 ### `aicli run`
 - 目的: モデル応答生成の途中で、必要に応じて `execute` を呼び出して追加情報を取得してから最終回答を作る
@@ -45,7 +50,11 @@
 - `OPENAI_API_KEY`（必須）
 - `OPENAI_BASE_URL`（任意）既定: `https://api.openai.com/v1`
 - `AICLI_MODEL`（任意）既定: `gpt-4.1-mini`（例）
-- `BRAVE_API_KEY`（search使用時に必須）
+
+検索:
+- `AICLI_SEARCH_PROVIDER`（任意）既定: `google_cse`
+- `GOOGLE_API_KEY` / `GOOGLE_CSE_CX`（provider=google_cse）
+- `BRAVE_API_KEY`（provider=brave）
 
 状態:
 - デフォルトで履歴保存なし
@@ -120,7 +129,18 @@ execute({
 
 ---
 
-## Web検索: Brave
+## Web検索: Google CSE（デフォルト）
+
+### リクエスト
+- Endpoint: `https://www.googleapis.com/customsearch/v1`
+- Query:
+  - `key=$GOOGLE_API_KEY`
+  - `cx=$GOOGLE_CSE_CX`
+  - `q=...`
+
+---
+
+## Web検索: Brave（任意）
 
 ### リクエスト
 - Endpoint: `https://api.search.brave.com/res/v1/web/search`
@@ -134,7 +154,7 @@ execute({
 
 ## `run --auto-search` のフロー（後者: 条件付き検索）
 1. モデルに「検索が必要か」「必要なら検索クエリ」を短いJSONで返させる
-2. 必要な場合のみ Brave検索
+2. 必要な場合のみ provider に応じて Web検索
 3. `SEARCH_RESULTS:` として会話に追加
 4. 最終回答生成（必要なら `execute` でファイル参照）
 

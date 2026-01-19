@@ -233,6 +233,85 @@ done:
 	return rc;
 }
 
+int aicli_openai_responses_post_raw_json(const char *api_key, const char *base_url,
+				     const char *json_payload,
+				     aicli_openai_http_response_t *out)
+{
+	if (!out)
+		return 2;
+	memset(out, 0, sizeof(*out));
+
+	if (!api_key || !api_key[0]) {
+		set_err(out->error, "OPENAI_API_KEY is not set");
+		return 2;
+	}
+	if (!base_url || !base_url[0])
+		base_url = "https://api.openai.com/v1";
+	if (!json_payload || !json_payload[0]) {
+		set_err(out->error, "missing json_payload");
+		return 2;
+	}
+
+	char *url = join_url_path(base_url, "/responses");
+	if (!url) {
+		set_err(out->error, "failed to build url");
+		return 2;
+	}
+
+	CURL *curl = curl_easy_init();
+	if (!curl) {
+		free(url);
+		set_err(out->error, "curl_easy_init failed");
+		return 2;
+	}
+
+	int rc = 0;
+	mem_buf_t buf = {0};
+
+	struct curl_slist *headers = NULL;
+	char auth[512];
+	snprintf(auth, sizeof(auth), "Authorization: Bearer %s", api_key);
+	headers = curl_slist_append(headers, auth);
+	headers = curl_slist_append(headers, "Content-Type: application/json");
+	headers = curl_slist_append(headers, "Accept: application/json");
+
+	curl_easy_setopt(curl, CURLOPT_HTTPHEADER, headers);
+	curl_easy_setopt(curl, CURLOPT_URL, url);
+	curl_easy_setopt(curl, CURLOPT_POST, 1L);
+	curl_easy_setopt(curl, CURLOPT_POSTFIELDS, json_payload);
+	curl_easy_setopt(curl, CURLOPT_POSTFIELDSIZE, (long)strlen(json_payload));
+	curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, write_cb);
+	curl_easy_setopt(curl, CURLOPT_WRITEDATA, &buf);
+	curl_easy_setopt(curl, CURLOPT_USERAGENT, "aicli/0.0.0");
+	curl_easy_setopt(curl, CURLOPT_TIMEOUT, 60L);
+	curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 10L);
+	curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 0L);
+
+	CURLcode cc = curl_easy_perform(curl);
+	if (cc != CURLE_OK) {
+		set_err(out->error, curl_easy_strerror(cc));
+		rc = 2;
+		goto done;
+	}
+
+	long status = 0;
+	(void)curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &status);
+	out->http_status = (int)status;
+	out->body = buf.data;
+	out->body_len = buf.len;
+	buf.data = NULL;
+	buf.len = 0;
+	buf.cap = 0;
+
+done:
+	mem_buf_free(&buf);
+	if (headers)
+		curl_slist_free_all(headers);
+	curl_easy_cleanup(curl);
+	free(url);
+	return rc;
+}
+
 void aicli_openai_http_response_free(aicli_openai_http_response_t *res)
 {
 	if (!res)

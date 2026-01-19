@@ -3,7 +3,14 @@ AC_INIT([aicli],[0.0.0],[unknown])
 AM_INIT_AUTOMAKE([-Wall -Werror foreign subdir-objects])
 AC_CONFIG_SRCDIR([src/main.c])
 AC_CONFIG_HEADERS([config.h])
+
+AC_CONFIG_MACRO_DIR([m4])
 AC_PROG_CC
+
+# pthreads
+AX_PTHREAD
+
+# AX_PTHREAD sets PTHREAD_CFLAGS and PTHREAD_LIBS.
 
 # libcurl (required)
 PKG_CHECK_MODULES([CURL],[libcurl])
