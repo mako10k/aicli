@@ -124,8 +124,7 @@ conf_model=$(
 )
 echo "$conf_model" | grep -q 'MODEL_FROM_WORK'
 
-# --no-config should ignore discovery. Current scaffold errors out; accept either success or
-# a clean, intentional failure message.
+# --no-config should ignore discovery.
 set +e
 no_conf_out=$(
 	cd "$repo_root/tmp/work/sub" && \
@@ -133,9 +132,7 @@ no_conf_out=$(
 )
 rc=$?
 set -e
-if [[ $rc -ne 0 ]]; then
-	echo "$no_conf_out" | grep -q 'subcommands not implemented yet (--no-config)'
-fi
+test $rc -eq 0
 
 # --config PATH: explicit file should be usable even if discovery exists.
 cat > tmp/work/sub/explicit.json <<'EOF'
