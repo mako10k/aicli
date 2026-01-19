@@ -13,6 +13,84 @@
 #include <yyjson.h>
 #endif
 
+static const char *skip_ws(const char *s)
+{
+	if (!s)
+		return "";
+	while (*s == ' ' || *s == '\t' || *s == '\n' || *s == '\r')
+		s++;
+	return s;
+}
+
+static void fprint_wrapped(FILE *out, const char *indent, const char *text,
+			   size_t max_chars, size_t wrap_col)
+{
+	if (!out)
+		return;
+	if (!indent)
+		indent = "";
+	if (!text)
+		text = "";
+	if (wrap_col < 20)
+		wrap_col = 80;
+
+	const char *s = skip_ws(text);
+	size_t printed = 0;
+	size_t col = 0;
+	int at_line_start = 1;
+
+	while (*s && printed < max_chars) {
+		// normalize whitespace to single space
+		if (*s == ' ' || *s == '\t' || *s == '\n' || *s == '\r') {
+			while (*s == ' ' || *s == '\t' || *s == '\n' || *s == '\r')
+				s++;
+			if (!*s)
+				break;
+			if (col + 1 >= wrap_col) {
+				fputc('\n', out);
+				col = 0;
+				at_line_start = 1;
+			} else {
+				if (at_line_start) {
+					fputs(indent, out);
+					col += strlen(indent);
+					at_line_start = 0;
+				}
+				fputc(' ', out);
+				col++;
+				printed++;
+			}
+			continue;
+		}
+
+		if (at_line_start) {
+			fputs(indent, out);
+			col += strlen(indent);
+			at_line_start = 0;
+		}
+		if (col + 1 >= wrap_col) {
+			fputc('\n', out);
+			col = 0;
+			at_line_start = 1;
+			continue;
+		}
+
+		fputc(*s, out);
+		s++;
+		col++;
+		printed++;
+	}
+
+	if (*s) {
+		if (col + 3 >= wrap_col) {
+			fputc('\n', out);
+			fputs(indent, out);
+		}
+		fputs("...", out);
+	}
+	fputc('\n', out);
+}
+
 static int cmd_exec_local(int argc, char **argv)
 {
 	// Internal helper for MVP testing:
@@ -179,6 +257,9 @@ static int cmd_web_search(int argc, char **argv, const aicli_config_t *cfg)
 		if (!results || !yyjson_is_arr(results)) {
 			fprintf(stderr, "unexpected JSON shape: missing web.results[]\n");
 		} else {
+			printf("# Brave Web Search\n");
+			printf("query: %s\n\n", query);
+
 			size_t idx, max;
 			yyjson_val *it;
 			max = yyjson_arr_size(results);
@@ -207,7 +288,11 @@ static int cmd_web_search(int argc, char **argv, const aicli_config_t *cfg)
 				if (!desc)
 					desc = "";
 
-				printf("%zu. %s\n   %s\n   %s\n\n", idx + 1, title, url, desc);
+				printf("%zu) ", idx + 1);
+				fprint_wrapped(stdout, "", title, 160, 80);
+				fprint_wrapped(stdout, "    ", url, 500, 90);
+				fprint_wrapped(stdout, "    ", desc, 500, 90);
+				fputc('\n', stdout);
 			}
 			yyjson_doc_free(doc);
 			aicli_brave_response_free(&res);
