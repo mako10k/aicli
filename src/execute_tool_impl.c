@@ -3,6 +3,7 @@
 #include "buf.h"
 
 #include <errno.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -191,6 +192,50 @@ static bool stage_sort_lines(const char *in, size_t in_len, bool reverse, aicli_
 	return true;
 }
 
+static bool stage_grep_fixed(const char *in, size_t in_len, const char *needle, bool with_line_numbers,
+			     aicli_buf_t *out) {
+	if (!needle || needle[0] == '\0') return true;
+	const size_t needle_len = strlen(needle);
+
+	unsigned long line_no = 1;
+	size_t i = 0;
+	size_t line_start = 0;
+	while (i <= in_len) {
+		if (i == in_len || in[i] == '\n') {
+			size_t line_len = i - line_start;
+			const char *line = in + line_start;
+
+			bool match = false;
+			if (needle_len <= line_len) {
+				for (size_t off = 0; off + needle_len <= line_len; off++) {
+					if (memcmp(line + off, needle, needle_len) == 0) {
+						match = true;
+						break;
+					}
+				}
+			}
+
+			if (match) {
+				if (with_line_numbers) {
+					char prefix[32];
+					int n = snprintf(prefix, sizeof(prefix), "%lu:", line_no);
+					if (n < 0) return false;
+					if (!aicli_buf_append(out, prefix, (size_t)n)) return false;
+				}
+				if (line_len > 0) {
+					if (!aicli_buf_append(out, line, line_len)) return false;
+				}
+				if (!aicli_buf_append(out, "\n", 1)) return false;
+			}
+
+			line_no++;
+			line_start = i + 1;
+		}
+		i++;
+	}
+	return true;
+}
+
 static size_t parse_head_n(const aicli_dsl_stage_t *st, bool *ok) {
 	*ok = true;
 	// head -n N
@@ -235,6 +280,21 @@ static bool parse_sort_reverse(const aicli_dsl_stage_t *st, bool *out_reverse) {
 	}
 	if (st->argc == 2 && strcmp(st->argv[1], "-r") == 0) {
 		*out_reverse = true;
+		return true;
+	}
+	return false;
+}
+
+static bool parse_grep_args(const aicli_dsl_stage_t *st, const char **out_pattern, bool *out_n) {
+	// grep PATTERN | grep -n PATTERN
+	if (st->argc == 2) {
+		*out_n = false;
+		*out_pattern = st->argv[1];
+		return true;
+	}
+	if (st->argc == 3 && strcmp(st->argv[1], "-n") == 0) {
+		*out_n = true;
+		*out_pattern = st->argv[2];
 		return true;
 	}
 	return false;
@@ -370,6 +430,14 @@ int aicli_execute_run(const aicli_allowlist_t *allow,
 				ok = false;
 			} else {
 				ok = stage_sort_lines(cur, cur_len, reverse, &tmp1);
+			}
+		} else if (stg->kind == AICLI_CMD_GREP) {
+			const char *pattern = NULL;
+			bool with_n = false;
+			if (!parse_grep_args(stg, &pattern, &with_n)) {
+				ok = false;
+			} else {
+				ok = stage_grep_fixed(cur, cur_len, pattern, with_n, &tmp1);
 			}
 		} else {
 			ok = false;

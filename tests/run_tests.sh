@@ -35,6 +35,13 @@ printf "b\na\nc\n" > tmp/sort.txt
 sorted=$("$bin" _exec --file tmp/sort.txt "cat tmp/sort.txt | sort" 2>/dev/null | tr -d '\r')
 test "$sorted" = $'a\nb\nc'
 
+# pipe: grep
+printf "foo\nbar\nfoo bar\n" > tmp/grep.txt
+g1=$("$bin" _exec --file tmp/grep.txt "cat tmp/grep.txt | grep foo" 2>/dev/null | tr -d '\r')
+test "$g1" = $'foo\nfoo bar'
+g2=$("$bin" _exec --file tmp/grep.txt "cat tmp/grep.txt | grep -n bar" 2>/dev/null | tr -d '\r')
+test "$g2" = $'2:bar\n3:foo bar'
+
 # pipe: wc
 bytes=$("$bin" _exec --file ../README.md "cat ../README.md | wc -c" 2>/dev/null | tr -d '\n')
 echo "$bytes" | grep -qE '^[0-9]+$'
