@@ -272,7 +272,21 @@ static int cmd_exec_local(int argc, char **argv)
 	while (i < argc && strncmp(argv[i], "--", 2) == 0) {
 		if (strcmp(argv[i], "--file") == 0 && i + 1 < argc) {
 			if (file_count < 16) {
-				char *rp = aicli_realpath_dup(argv[i + 1]);
+				// Resolve relative paths against the current working directory so that
+				// allowlist entries match what execute() will resolve (it uses realpath()).
+				char *rp = NULL;
+				if (argv[i + 1][0] == '/') {
+					rp = aicli_realpath_dup(argv[i + 1]);
+				} else {
+					char cwd[4096];
+					if (!getcwd(cwd, sizeof(cwd))) {
+						fprintf(stderr, "failed to get cwd for --file\n");
+						return 2;
+					}
+					char joined[8192];
+					snprintf(joined, sizeof(joined), "%s/%s", cwd, argv[i + 1]);
+					rp = aicli_realpath_dup(joined);
+				}
 				if (!rp) {
 					fprintf(stderr, "invalid file: %s\n", argv[i + 1]);
 					return 2;
@@ -490,6 +504,10 @@ static int cmd_run(int argc, char **argv, const aicli_config_t *cfg)
 
 	aicli_allowed_file_t files[32];
 	int file_count = 0;
+	// Keep a simple owned array of realpath strings for the tool allowlist.
+	// `files[].path` may be freed later; the tool loop must retain valid pointers.
+	char *allow_paths[32];
+	memset(allow_paths, 0, sizeof(allow_paths));
 	bool auto_search = false;
 	const char *available_tools = NULL;
 	const char *force_tool = NULL;
@@ -508,12 +526,25 @@ static int cmd_run(int argc, char **argv, const aicli_config_t *cfg)
 				        sizeof(files) / sizeof(files[0]));
 				return 2;
 			}
-			char *rp = aicli_realpath_dup(argv[i + 1]);
+			char *rp = NULL;
+			if (argv[i + 1][0] == '/') {
+				rp = aicli_realpath_dup(argv[i + 1]);
+			} else {
+				char cwd[4096];
+				if (!getcwd(cwd, sizeof(cwd))) {
+					fprintf(stderr, "failed to get cwd for --file\n");
+					return 2;
+				}
+				char joined[8192];
+				snprintf(joined, sizeof(joined), "%s/%s", cwd, argv[i + 1]);
+				rp = aicli_realpath_dup(joined);
+			}
 			if (!rp) {
 				fprintf(stderr, "invalid file: %s\n", argv[i + 1]);
 				return 2;
 			}
 			files[file_count].path = rp;
+			allow_paths[file_count] = rp;
 			files[file_count].name = argv[i + 1];
 			(void)aicli_get_file_size(rp, &files[file_count].size_bytes);
 			file_count++;
@@ -838,7 +869,13 @@ static int cmd_run(int argc, char **argv, const aicli_config_t *cfg)
 		}
 	}
 
-	aicli_allowlist_t allow = {.files = files, .file_count = file_count};
+	aicli_allowed_file_t allow_files[32];
+	for (int ai = 0; ai < file_count; ai++) {
+		allow_files[ai].path = allow_paths[ai];
+		allow_files[ai].name = files[ai].name;
+		allow_files[ai].size_bytes = files[ai].size_bytes;
+	}
+	aicli_allowlist_t allow = {.files = allow_files, .file_count = file_count};
 	char *final_text = NULL;
 	const char *to_send = augmented_prompt ? augmented_prompt : prompt;
 	// tool_choice semantics (Responses API): "none" disables, "auto" lets model decide,
@@ -867,8 +904,9 @@ static int cmd_run(int argc, char **argv, const aicli_config_t *cfg)
 	int rc = aicli_openai_run_with_tools(&cfg_local, &allow, to_send, turns, max_tool_calls,
 	                                   tool_threads, tool_choice, &final_text);
 	free(augmented_prompt);
+	// Free allowlisted paths after the tool loop finishes.
 	for (int fi = 0; fi < file_count; fi++)
-		free((void *)files[fi].path);
+		free(allow_paths[fi]);
 
 	if (rc != 0) {
 		fprintf(stderr, "openai request failed\n");

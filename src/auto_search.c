@@ -90,7 +90,7 @@ bool aicli_auto_search_plan(const aicli_config_t *cfg,
 	if (!user_prompt || !user_prompt[0])
 		return false;
 
-	const char *model = (cfg->model && cfg->model[0]) ? cfg->model : "gpt-4.1-mini";
+	const char *model = (cfg->model && cfg->model[0]) ? cfg->model : "gpt-5-mini";
 
 	// Keep it extremely small and robust.
 	const char *system =

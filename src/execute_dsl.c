@@ -127,6 +127,9 @@ aicli_dsl_status_t aicli_dsl_parse_pipeline(const char *command, aicli_dsl_pipel
 		return AICLI_DSL_ERR_EMPTY;
 
 	for (const char *c = command; *c; c++) {
+		// Allow pipelines separated by '|', while still blocking other metacharacters.
+		if (*c == '|')
+			continue;
 		if (is_forbidden_char(*c))
 			return AICLI_DSL_ERR_FORBIDDEN;
 	}

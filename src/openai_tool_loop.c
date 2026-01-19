@@ -10,6 +10,7 @@
 
 #include "openai_responses.h"
 #include "threadpool.h"
+#include "buf.h"
 
 static const char *safe_str(const char *s) { return s ? s : ""; }
 
@@ -60,6 +61,213 @@ static char *dup_cstr(const char *s)
 	return p;
 }
 
+static bool buf_append_json_hex2(aicli_buf_t *b, unsigned char v)
+{
+	static const char hex[] = "0123456789abcdef";
+	char tmp[2];
+	tmp[0] = hex[(v >> 4) & 0xF];
+	tmp[1] = hex[v & 0xF];
+	return aicli_buf_append(b, tmp, sizeof(tmp));
+}
+
+static bool buf_append_json_string_escaped_bytes(aicli_buf_t *b, const unsigned char *s, size_t n)
+{
+	// Appends JSON string content (WITHOUT surrounding quotes).
+	// Escapes control chars and forces non-ASCII bytes to \u00XX to avoid UTF-8 concerns.
+	for (size_t i = 0; i < n; i++) {
+		unsigned char c = s[i];
+		switch (c) {
+		case '"':
+			if (!aicli_buf_append_str(b, "\\\""))
+				return false;
+			break;
+		case '\\':
+			if (!aicli_buf_append_str(b, "\\\\"))
+				return false;
+			break;
+		case '\b':
+			if (!aicli_buf_append_str(b, "\\b"))
+				return false;
+			break;
+		case '\f':
+			if (!aicli_buf_append_str(b, "\\f"))
+				return false;
+			break;
+		case '\n':
+			if (!aicli_buf_append_str(b, "\\n"))
+				return false;
+			break;
+		case '\r':
+			if (!aicli_buf_append_str(b, "\\r"))
+				return false;
+			break;
+		case '\t':
+			if (!aicli_buf_append_str(b, "\\t"))
+				return false;
+			break;
+		default:
+			if (c < 0x20 || c >= 0x80) {
+				if (!aicli_buf_append_str(b, "\\u00"))
+					return false;
+				if (!buf_append_json_hex2(b, c))
+					return false;
+			} else {
+				if (!aicli_buf_append(b, &c, 1))
+					return false;
+			}
+			break;
+		}
+	}
+	return true;
+}
+
+static bool buf_append_json_string_escaped_cstr(aicli_buf_t *b, const char *s)
+{
+	if (!s)
+		return true;
+	return buf_append_json_string_escaped_bytes(b, (const unsigned char *)s, strlen(s));
+}
+
+static char *build_function_call_output_item_json_manual(const char *call_id, const aicli_tool_result_t *r)
+{
+	// Build:
+	// {"type":"function_call_output","call_id":"...","output":"{...json...}"}
+	// NOTE: output must be a JSON string, so the inner JSON is double-escaped.
+	if (!call_id || !call_id[0])
+		return NULL;
+
+	aicli_buf_t b;
+	if (!aicli_buf_init(&b, 512))
+		return NULL;
+
+	bool ok = true;
+	ok = ok && aicli_buf_append_str(&b, "{\"type\":\"function_call_output\",\"call_id\":\"");
+	ok = ok && buf_append_json_string_escaped_cstr(&b, call_id);
+	ok = ok && aicli_buf_append_str(&b, "\",\"output\":\"");
+
+	// Begin inner JSON (as a string):
+	ok = ok && aicli_buf_append_str(&b, "{\\\"ok\\\":");
+	ok = ok && aicli_buf_append_str(&b, (r && r->exit_code == 0) ? "true" : "false");
+
+	char tmp[128];
+	snprintf(tmp, sizeof(tmp), ",\\\"exit_code\\\":%d", r ? r->exit_code : 2);
+	ok = ok && aicli_buf_append_str(&b, tmp);
+
+	// stdout_text (bytes -> \u00XX-safe)
+	ok = ok && aicli_buf_append_str(&b, ",\\\"stdout_text\\\":\\\"");
+	if (r && r->stdout_text && r->stdout_len) {
+		// Escape stdout bytes into JSON string content, then escape again for outer string.
+		// We do this by emitting \u00XX etc already containing backslashes; so we must escape
+		// backslash for the OUTER string: each '\\' becomes '\\\\'.
+		// Simplest: escape bytes as JSON for inner, but with '\\' doubled.
+		for (size_t i = 0; ok && i < r->stdout_len; i++) {
+			unsigned char c = (unsigned char)r->stdout_text[i];
+			switch (c) {
+			case '"':
+				ok = ok && aicli_buf_append_str(&b, "\\\\\\\"");
+				break;
+			case '\\':
+				ok = ok && aicli_buf_append_str(&b, "\\\\\\\\");
+				break;
+			case '\b':
+				ok = ok && aicli_buf_append_str(&b, "\\\\b");
+				break;
+			case '\f':
+				ok = ok && aicli_buf_append_str(&b, "\\\\f");
+				break;
+			case '\n':
+				ok = ok && aicli_buf_append_str(&b, "\\\\n");
+				break;
+			case '\r':
+				ok = ok && aicli_buf_append_str(&b, "\\\\r");
+				break;
+			case '\t':
+				ok = ok && aicli_buf_append_str(&b, "\\\\t");
+				break;
+			default:
+				if (c < 0x20 || c >= 0x80) {
+					ok = ok && aicli_buf_append_str(&b, "\\\\u00");
+					ok = ok && buf_append_json_hex2(&b, c);
+				} else {
+					ok = ok && aicli_buf_append(&b, &c, 1);
+				}
+				break;
+			}
+		}
+	}
+	ok = ok && aicli_buf_append_str(&b, "\\\"");
+
+	// stderr_text (cstr)
+	ok = ok && aicli_buf_append_str(&b, ",\\\"stderr_text\\\":\\\"");
+	if (r && r->stderr_text && r->stderr_text[0]) {
+		// Same doubling rule as above: escape for inner, but keep backslashes doubled.
+		const unsigned char *sp = (const unsigned char *)r->stderr_text;
+		size_t sn = strlen(r->stderr_text);
+		for (size_t i = 0; ok && i < sn; i++) {
+			unsigned char c = sp[i];
+			switch (c) {
+			case '"':
+				ok = ok && aicli_buf_append_str(&b, "\\\\\\\"");
+				break;
+			case '\\':
+				ok = ok && aicli_buf_append_str(&b, "\\\\\\\\");
+				break;
+			case '\n':
+				ok = ok && aicli_buf_append_str(&b, "\\\\n");
+				break;
+			case '\r':
+				ok = ok && aicli_buf_append_str(&b, "\\\\r");
+				break;
+			case '\t':
+				ok = ok && aicli_buf_append_str(&b, "\\\\t");
+				break;
+			default:
+				if (c < 0x20 || c >= 0x80) {
+					ok = ok && aicli_buf_append_str(&b, "\\\\u00");
+					ok = ok && buf_append_json_hex2(&b, c);
+				} else {
+					ok = ok && aicli_buf_append(&b, &c, 1);
+				}
+				break;
+			}
+		}
+	}
+	ok = ok && aicli_buf_append_str(&b, "\\\"");
+
+	snprintf(tmp, sizeof(tmp), ",\\\"total_bytes\\\":%zu", r ? r->total_bytes : (size_t)0);
+	ok = ok && aicli_buf_append_str(&b, tmp);
+	ok = ok && aicli_buf_append_str(&b, ",\\\"truncated\\\":");
+	ok = ok && aicli_buf_append_str(&b, (r && r->truncated) ? "true" : "false");
+	ok = ok && aicli_buf_append_str(&b, ",\\\"cache_hit\\\":");
+	ok = ok && aicli_buf_append_str(&b, (r && r->cache_hit) ? "true" : "false");
+
+	if (r && r->has_next_start) {
+		snprintf(tmp, sizeof(tmp), ",\\\"next_start\\\":%zu", r->next_start);
+		ok = ok && aicli_buf_append_str(&b, tmp);
+	} else {
+		ok = ok && aicli_buf_append_str(&b, ",\\\"next_start\\\":null");
+	}
+
+	ok = ok && aicli_buf_append_str(&b, "}");
+
+	// Close outer output string and object.
+	ok = ok && aicli_buf_append_str(&b, "\"}");
+
+	if (!ok) {
+		aicli_buf_free(&b);
+		return NULL;
+	}
+
+	// NUL-terminate.
+	if (!aicli_buf_append(&b, "\0", 1)) {
+		aicli_buf_free(&b);
+		return NULL;
+	}
+	char *out = b.data;
+	// Transfer ownership.
+	return out;
+}
+
 static char *build_execute_tool_json(void)
 {
 	// JSON array of tool definitions for Responses API.
@@ -68,23 +276,26 @@ static char *build_execute_tool_json(void)
 	yyjson_mut_val *arr = yyjson_mut_arr(doc);
 	yyjson_mut_doc_set_root(doc, arr);
 
+	// tools: [{type:"function", name:"execute", description:"...", parameters:{...}, strict:false}]
 	yyjson_mut_val *tool = yyjson_mut_obj(doc);
 	yyjson_mut_arr_add_val(arr, tool);
 	yyjson_mut_obj_add_str(doc, tool, "type", "function");
-		yyjson_mut_obj_add_str(doc, tool, "name", "execute");
-
-		yyjson_mut_val *fn = yyjson_mut_obj(doc);
-		yyjson_mut_obj_add_val(doc, tool, "function", fn);
-		yyjson_mut_obj_add_str(doc, fn, "description",
-		                      "Read-only restricted file access via a safe DSL."
-		                      " Use ONLY for reading allowlisted local files."
-		                      " MUST provide 'command'."
-		                      " Examples: 'cat README.md', 'head -n 80 README.md', 'sed -n 1,120p README.md'."
-		                      " Do NOT use a shell; do NOT use pipes/redirections/globs; keep it simple and safe.");
+	yyjson_mut_obj_add_str(doc, tool, "name", "execute");
+	// Keep strict disabled unless we can satisfy all strict requirements.
+	yyjson_mut_obj_add_bool(doc, tool, "strict", false);
+	// Description placed on the tool object per official docs.
+	yyjson_mut_obj_add_str(doc, tool, "description",
+	                      "Read-only restricted file access via a safe DSL. "
+	                      "Use ONLY for reading allowlisted local files. "
+	                      "MUST provide 'command'. Examples: \n"
+	                      "'cat README.md', 'cat README.md | head -n 80', 'sed -n 1,120p README.md'. "
+	                      "Do NOT use a shell; do NOT use redirections/globs; "
+	                      "keep it simple and safe.");
 
 	yyjson_mut_val *params = yyjson_mut_obj(doc);
-		yyjson_mut_obj_add_val(doc, fn, "parameters", params);
+	yyjson_mut_obj_add_val(doc, tool, "parameters", params);
 	yyjson_mut_obj_add_str(doc, params, "type", "object");
+	yyjson_mut_obj_add_bool(doc, params, "additionalProperties", false);
 
 	yyjson_mut_val *props = yyjson_mut_obj(doc);
 	yyjson_mut_obj_add_val(doc, params, "properties", props);
@@ -102,14 +313,14 @@ static char *build_execute_tool_json(void)
 
 	yyjson_mut_val *p_start = yyjson_mut_obj(doc);
 	yyjson_mut_obj_add_str(doc, p_start, "type", "integer");
-	yyjson_mut_obj_add_str(doc, p_start, "minimum", "0");
+	yyjson_mut_obj_add_int(doc, p_start, "minimum", 0);
 	yyjson_mut_obj_add_str(doc, p_start, "description", "Byte offset for paging.");
 	yyjson_mut_obj_add_val(doc, props, "start", p_start);
 
 	yyjson_mut_val *p_size = yyjson_mut_obj(doc);
 	yyjson_mut_obj_add_str(doc, p_size, "type", "integer");
-	yyjson_mut_obj_add_str(doc, p_size, "minimum", "1");
-	yyjson_mut_obj_add_str(doc, p_size, "maximum", "4096");
+	yyjson_mut_obj_add_int(doc, p_size, "minimum", 1);
+	yyjson_mut_obj_add_int(doc, p_size, "maximum", 4096);
 	yyjson_mut_obj_add_str(doc, p_size, "description", "Max bytes to return (<=4096).");
 	yyjson_mut_obj_add_val(doc, props, "size", p_size);
 
@@ -129,9 +340,77 @@ typedef struct {
 	bool done;
 } exec_job_t;
 
+static void free_execute_request_owned(aicli_execute_request_t *r)
+{
+	if (!r)
+		return;
+	free((void *)r->id);
+	free((void *)r->command);
+	free((void *)r->file);
+	free((void *)r->idempotency);
+	memset(r, 0, sizeof(*r));
+}
+
+static int dup_execute_request_strings(aicli_execute_request_t *r)
+{
+	if (!r)
+		return 1;
+	// command is required
+	if (!r->command || !r->command[0])
+		return 1;
+	char *cmd = dup_cstr(r->command);
+	if (!cmd)
+		return 1;
+	char *file = NULL;
+	char *id = NULL;
+	char *idem = NULL;
+	if (r->file && r->file[0]) {
+		file = dup_cstr(r->file);
+		if (!file) {
+			free(cmd);
+			return 1;
+		}
+	}
+	if (r->id && r->id[0]) {
+		id = dup_cstr(r->id);
+		if (!id) {
+			free(cmd);
+			free(file);
+			return 1;
+		}
+	}
+	if (r->idempotency && r->idempotency[0]) {
+		idem = dup_cstr(r->idempotency);
+		if (!idem) {
+			free(cmd);
+			free(file);
+			free(id);
+			return 1;
+		}
+	}
+
+	r->command = cmd;
+	r->file = file;
+	r->id = id;
+	r->idempotency = idem;
+	return 0;
+}
+
 static void exec_job_main(void *arg)
 {
 	exec_job_t *j = (exec_job_t *)arg;
+	// Optional debug: show allowlisted paths for troubleshooting.
+	if (j && j->allow && j->allow->files && j->allow->file_count > 0) {
+		// No cfg pointer here; keep it quiet by default.
+		// Intentionally not printing unless AICLI_DEBUG_ALLOWLIST=1.
+		const char *env = getenv("AICLI_DEBUG_ALLOWLIST");
+		if (env && env[0] == '1') {
+			fprintf(stderr, "[debug:execute] allowlist file_count=%d\n", j->allow->file_count);
+			for (int i = 0; i < j->allow->file_count; i++) {
+				fprintf(stderr, "[debug:execute] allow[%d]=%s\n", i, safe_str(j->allow->files[i].path));
+			}
+		}
+	}
 	(void)aicli_execute_run(j->allow, &j->req, &j->res);
 	j->done = true;
 }
@@ -345,6 +624,12 @@ static int collect_execute_calls(yyjson_val *root,
 			continue;
 		if (!jobs[n].req.command || !jobs[n].req.command[0])
 			continue;
+		// The parsed strings point into the yyjson_doc; copy them so they stay valid
+		// after we free the response document and while worker threads run.
+		if (dup_execute_request_strings(&jobs[n].req) != 0) {
+			free_execute_request_owned(&jobs[n].req);
+			continue;
+		}
 		// Keep a stable copy beyond the yyjson_doc lifetime.
 		call_ids[n] = dup_cstr(yyjson_get_str(call_id));
 		n++;
@@ -451,45 +736,7 @@ static void debug_log_execute_calls_if_enabled(const aicli_config_t *cfg, yyjson
 
 static char *build_function_call_output_item_json(const char *call_id, const aicli_tool_result_t *r)
 {
-	// Build a single output item:
-	// {"type":"function_call_output","call_id":"...","output":"{...json...}"}
-	yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
-	yyjson_mut_val *item = yyjson_mut_obj(doc);
-	yyjson_mut_doc_set_root(doc, item);
-
-	yyjson_mut_obj_add_str(doc, item, "type", "function_call_output");
-	yyjson_mut_obj_add_str(doc, item, "call_id", safe_str(call_id));
-
-	// output must be a string; embed JSON of tool result.
-	yyjson_mut_doc *rd = yyjson_mut_doc_new(NULL);
-	yyjson_mut_val *ro = yyjson_mut_obj(rd);
-	yyjson_mut_doc_set_root(rd, ro);
-
-	yyjson_mut_obj_add_bool(rd, ro, "ok", r && r->exit_code == 0);
-	yyjson_mut_obj_add_int(rd, ro, "exit_code", r ? r->exit_code : 2);
-	yyjson_mut_obj_add_str(rd, ro, "stdout_text", r && r->stdout_text ? r->stdout_text : "");
-	yyjson_mut_obj_add_str(rd, ro, "stderr_text", r && r->stderr_text ? r->stderr_text : "");
-	yyjson_mut_obj_add_int(rd, ro, "total_bytes", (long long)(r ? (long long)r->total_bytes : 0));
-	yyjson_mut_obj_add_bool(rd, ro, "truncated", r ? r->truncated : true);
-	yyjson_mut_obj_add_bool(rd, ro, "cache_hit", r ? r->cache_hit : false);
-	if (r && r->has_next_start)
-		yyjson_mut_obj_add_int(rd, ro, "next_start", (long long)r->next_start);
-	else
-		yyjson_mut_obj_add_null(rd, ro, "next_start");
-
-	char *rjson = yyjson_mut_write(rd, 0, NULL);
-	yyjson_mut_doc_free(rd);
-	if (!rjson) {
-		yyjson_mut_doc_free(doc);
-		return NULL;
-	}
-
-	yyjson_mut_obj_add_str(doc, item, "output", rjson);
-	free(rjson);
-
-	char *json = yyjson_mut_write(doc, 0, NULL);
-	yyjson_mut_doc_free(doc);
-	return json;
+	return build_function_call_output_item_json_manual(call_id, r);
 }
 
 static char *build_next_request_json(const char *model,
@@ -510,7 +757,8 @@ static char *build_next_request_json(const char *model,
 	yyjson_mut_obj_add_str(doc, root, "model", model);
 	yyjson_mut_obj_add_str(doc, root, "previous_response_id", previous_response_id);
 
-	// input: an array of tool output items.
+	// Per the function calling guide, follow-ups append tool outputs directly
+	// to the running input list (not wrapped as message content items).
 	yyjson_mut_val *input = yyjson_mut_arr(doc);
 	yyjson_mut_obj_add_val(doc, root, "input", input);
 
@@ -572,7 +820,7 @@ int aicli_openai_run_with_tools(const aicli_config_t *cfg,
 		debug_print_trunc(stderr, "[debug:api] tools_json", tools_json, maxb);
 	}
 
-	const char *model = (cfg->model && cfg->model[0]) ? cfg->model : "gpt-4.1-mini";
+	const char *model = (cfg->model && cfg->model[0]) ? cfg->model : "gpt-5-mini";
 
 	aicli_openai_request_t req0 = {
 	    .model = model,
@@ -593,6 +841,12 @@ int aicli_openai_run_with_tools(const aicli_config_t *cfg,
 	}
 	if (cfg && debug_level_enabled(cfg->debug_api))
 		fprintf(stderr, "[debug:api] response http_status=%d body_len=%zu\n", http.http_status, http.body_len);
+	if (cfg && cfg->debug_api >= 3 && http.body && http.body_len) {
+		size_t maxb = debug_max_bytes_for_level(cfg->debug_api);
+		if (maxb == 0)
+			maxb = 4096;
+		debug_print_trunc(stderr, "[debug:api] response body", http.body, maxb);
+	}
 	if (http.http_status != 200 || !http.body || http.body_len == 0) {
 		fprintf(stderr, "openai http_status=%d\n", http.http_status);
 		if (http.body && http.body_len) {
@@ -701,12 +955,46 @@ int aicli_openai_run_with_tools(const aicli_config_t *cfg,
 		for (size_t i = 0; i < call_count; i++) {
 			items_json[i] = build_function_call_output_item_json(call_ids[i], &jobs[i].res);
 		}
+		for (size_t i = 0; i < call_count; i++) {
+			if (!items_json[i] || !items_json[i][0]) {
+				fprintf(stderr,
+				        "openai tool call failed: could not serialize tool output (call_id=%s)\n",
+				        safe_str(call_ids[i]));
+				for (size_t k = 0; k < call_count; k++) {
+					if (jobs[k].res.stdout_text)
+						free((void *)jobs[k].res.stdout_text);
+					free_execute_request_owned(&jobs[k].req);
+					free(items_json[k]);
+					free(call_ids[k]);
+				}
+				free(items_json);
+				free(jobs);
+				free(call_ids);
+				yyjson_doc_free(doc);
+				aicli_openai_http_response_free(&http);
+				free(tools_json);
+				return 2;
+			}
+		}
+		if (cfg && cfg->debug_api >= 3) {
+			for (size_t i = 0; i < call_count; i++) {
+				if (!items_json[i] || !items_json[i][0]) {
+					fprintf(stderr, "[debug:api] WARN: tool output item NULL/empty for call_id=%s\n", safe_str(call_ids[i]));
+				} else {
+					size_t maxb = debug_max_bytes_for_level(cfg->debug_api);
+					if (maxb == 0)
+						maxb = 4096;
+					debug_print_trunc(stderr, "[debug:api] tool output item", items_json[i], maxb);
+				}
+			}
+		}
 
 		char *next_payload = build_next_request_json(model, resp_id, tools_json,
 		                                           (const char **)items_json, call_count);
 		for (size_t i = 0; i < call_count; i++) {
 			if (jobs[i].res.stdout_text)
 				free((void *)jobs[i].res.stdout_text);
+			free_execute_request_owned(&jobs[i].req);
 			free(items_json[i]);
 			free(call_ids[i]);
 		}
@@ -720,6 +1008,12 @@ int aicli_openai_run_with_tools(const aicli_config_t *cfg,
 
 		aicli_openai_http_response_free(&http);
 		memset(&http, 0, sizeof(http));
+		if (cfg && cfg->debug_api >= 3) {
+			size_t maxb = debug_max_bytes_for_level(cfg->debug_api);
+			if (maxb == 0)
+				maxb = 4096;
+			debug_print_trunc(stderr, "[debug:api] follow-up payload", next_payload, maxb);
+		}
 		rc = aicli_openai_responses_post_raw_json(cfg->openai_api_key, cfg->openai_base_url,
 		                                       next_payload, &http);
 		free(next_payload);
