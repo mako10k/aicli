@@ -1,5 +1,5 @@
 #include "aicli.h"
-#include "config.h"
+#include "aicli_config.h"
 
 #include <stdlib.h>
 

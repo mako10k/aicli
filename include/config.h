@@ -1,6 +1,2 @@
-#pragma once
-
-#include <stdbool.h>
-#include "aicli.h"
-
-bool aicli_config_load_from_env(aicli_config_t *out);
+// Deprecated: this file name conflicts with Autotools-generated `config.h`.
+// Use `aicli_config.h` instead.

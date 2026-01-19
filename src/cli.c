@@ -5,7 +5,7 @@
 #include <string.h>
 
 #include "aicli.h"
-#include "config.h"
+#include "aicli_config.h"
 #include "execute_tool.h"
 
 static int cmd_exec_local(int argc, char **argv) {
