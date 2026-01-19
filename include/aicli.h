@@ -29,3 +29,12 @@ typedef struct {
 	bool has_next_start;
 	size_t next_start;
 } aicli_tool_result_t;
+
+typedef struct {
+	const char *id;
+	const char *command;
+	const char *file; // optional hint
+	const char *idempotency; // optional
+	size_t start;
+	size_t size;
+} aicli_execute_request_t;

@@ -18,7 +18,9 @@ SRCS := \
 	$(SRC_DIR)/cli.c \
 	$(SRC_DIR)/config.c \
 	$(SRC_DIR)/brave_search.c \
-	$(SRC_DIR)/execute_tool.c \
+	$(SRC_DIR)/execute_dsl.c \
+	$(SRC_DIR)/execute_tool_impl.c \
+	$(SRC_DIR)/path_util.c \
 	$(SRC_DIR)/paging_cache.c
 
 OBJS := $(patsubst $(SRC_DIR)/%.c,$(OBJ_DIR)/%.o,$(SRCS))
