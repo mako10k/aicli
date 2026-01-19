@@ -1,6 +1,7 @@
 #include "execute_tool.h"
 
 #include "buf.h"
+#include "execute/allowlist.h"
 #include "execute/file_reader.h"
 #include "execute/paging.h"
 #include "execute/pipeline_stages.h"
@@ -10,17 +11,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-
-static bool allowlist_contains(const aicli_allowlist_t *allow, const char *path)
-{
-	if (!allow || !path)
-		return false;
-	for (int i = 0; i < allow->file_count; i++) {
-		if (strcmp(allow->files[i].path, path) == 0)
-			return true;
-	}
-	return false;
-}
 
 int aicli_execute_run(const aicli_allowlist_t *allow, const aicli_execute_request_t *req,
                       aicli_tool_result_t *out)
@@ -56,7 +46,7 @@ int aicli_execute_run(const aicli_allowlist_t *allow, const aicli_execute_reques
 		out->exit_code = 2;
 		return 0;
 	}
-	if (!allowlist_contains(allow, rp)) {
+	if (!aicli_allowlist_contains(allow, rp)) {
 		free(rp);
 		out->stderr_text = "file_not_allowed";
 		out->exit_code = 3;
