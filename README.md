@@ -92,3 +92,34 @@ export GOOGLE_CSE_CX=...
 ## 注意
 - `execute` は read-only。ファイル変更/外部コマンド実行/リダイレクトは禁止。
 - 読み込み可能ファイルは `--file` で指定したもののみ。
+
+## ツール（Function Calling）
+
+### `list_allowed_files`
+
+`execute` で読み込み可能なファイル（allowlist）を **一覧** する read-only ツールです。
+説明用/探索用で、ファイル内容の取得はしません。`execute` 可能なパスを知りたいときに使います。
+
+引数:
+- `query`（任意）: full path に対する case-insensitive 部分一致フィルタ
+- `start`（任意）: 0-based の開始インデックス（ページング）
+- `size`（任意）: 返す最大件数（1〜200、デフォルト 50）
+
+戻り値（`output` 内 JSON）:
+- `total`: フィルタ後の総件数
+- `returned`: 今回返した件数
+- `has_next` / `next_start`: 次ページがある場合の開始位置
+- `files[]`: `path`, `name`, `size_bytes`
+
+例（概念的）:
+- 先頭 50 件: `{"query":"","start":0,"size":50}`
+- README を含むパスだけ: `{"query":"README","start":0,"size":50}`
+
+### `execute`
+
+allowlist に含まれるローカルファイルを、限定DSLで read-only 参照します。
+まず `list_allowed_files` で対象パスを把握してから `execute` するのが安全です。
+
+## stdin（`run` / `_exec`）
+
+`run` と `_exec` は `--stdin` または `--file -` を指定すると標準入力を読み込み、内部で一時ファイル化して allowlist に追加します（read-only 方針維持）。

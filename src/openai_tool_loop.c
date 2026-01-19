@@ -12,6 +12,8 @@
 #include "threadpool.h"
 #include "buf.h"
 
+#include "allowlist_list_tool.h"
+
 static const char *safe_str(const char *s) { return s ? s : ""; }
 
 static int debug_level_enabled(int level) { return level > 0; }
@@ -276,7 +278,7 @@ static char *build_execute_tool_json(void)
 	yyjson_mut_val *arr = yyjson_mut_arr(doc);
 	yyjson_mut_doc_set_root(doc, arr);
 
-	// tools: [{type:"function", name:"execute", description:"...", parameters:{...}, strict:false}]
+	// tools: [{...execute...}, {...list_allowed_files...}]
 	yyjson_mut_val *tool = yyjson_mut_obj(doc);
 	yyjson_mut_arr_add_val(arr, tool);
 	yyjson_mut_obj_add_str(doc, tool, "type", "function");
@@ -328,6 +330,43 @@ static char *build_execute_tool_json(void)
 	yyjson_mut_arr_add_str(doc, required, "command");
 	yyjson_mut_obj_add_val(doc, params, "required", required);
 
+	// list_allowed_files
+	yyjson_mut_val *tool2 = yyjson_mut_obj(doc);
+	yyjson_mut_arr_add_val(arr, tool2);
+	yyjson_mut_obj_add_str(doc, tool2, "type", "function");
+	yyjson_mut_obj_add_str(doc, tool2, "name", "list_allowed_files");
+	yyjson_mut_obj_add_bool(doc, tool2, "strict", false);
+	yyjson_mut_obj_add_str(doc, tool2, "description",
+	                      "Read-only: list allowlisted local files for the execute tool. "
+	                      "Returns paths/names/sizes only (no file contents). "
+	                      "Supports case-insensitive substring filtering (query) and paging (start/size). ");
+
+	yyjson_mut_val *params2 = yyjson_mut_obj(doc);
+	yyjson_mut_obj_add_val(doc, tool2, "parameters", params2);
+	yyjson_mut_obj_add_str(doc, params2, "type", "object");
+	yyjson_mut_obj_add_bool(doc, params2, "additionalProperties", false);
+
+	yyjson_mut_val *props2 = yyjson_mut_obj(doc);
+	yyjson_mut_obj_add_val(doc, params2, "properties", props2);
+
+	yyjson_mut_val *p_query = yyjson_mut_obj(doc);
+	yyjson_mut_obj_add_str(doc, p_query, "type", "string");
+	yyjson_mut_obj_add_str(doc, p_query, "description", "Optional case-insensitive substring filter on full path.");
+	yyjson_mut_obj_add_val(doc, props2, "query", p_query);
+
+	yyjson_mut_val *p_start2 = yyjson_mut_obj(doc);
+	yyjson_mut_obj_add_str(doc, p_start2, "type", "integer");
+	yyjson_mut_obj_add_int(doc, p_start2, "minimum", 0);
+	yyjson_mut_obj_add_str(doc, p_start2, "description", "0-based start index for paging.");
+	yyjson_mut_obj_add_val(doc, props2, "start", p_start2);
+
+	yyjson_mut_val *p_size2 = yyjson_mut_obj(doc);
+	yyjson_mut_obj_add_str(doc, p_size2, "type", "integer");
+	yyjson_mut_obj_add_int(doc, p_size2, "minimum", 1);
+	yyjson_mut_obj_add_int(doc, p_size2, "maximum", 200);
+	yyjson_mut_obj_add_str(doc, p_size2, "description", "Max items to return (<=200). Default 50.");
+	yyjson_mut_obj_add_val(doc, props2, "size", p_size2);
+
 	char *json = yyjson_mut_write(doc, 0, NULL);
 	yyjson_mut_doc_free(doc);
 	return json;
@@ -339,6 +378,129 @@ typedef struct {
 	aicli_tool_result_t res;
 	bool done;
 } exec_job_t;
+
+typedef struct {
+	const aicli_allowlist_t *allow;
+	aicli_list_allowed_files_request_t req;
+	aicli_list_allowed_files_result_t res;
+	bool done;
+} list_job_t;
+
+static void free_list_request_owned(aicli_list_allowed_files_request_t *r)
+{
+	if (!r)
+		return;
+	free((void *)r->query);
+	memset(r, 0, sizeof(*r));
+}
+
+static int parse_list_allowed_files_arguments(yyjson_val *args, aicli_list_allowed_files_request_t *out)
+{
+	if (!out)
+		return 1;
+	*out = (aicli_list_allowed_files_request_t){0};
+
+	// arguments can be a JSON string or an object
+	yyjson_doc *adoc = NULL;
+	yyjson_val *root = NULL;
+	if (!args)
+		return 0;
+
+	if (yyjson_is_str(args)) {
+		const char *s = yyjson_get_str(args);
+		if (s && s[0])
+			adoc = yyjson_read(s, strlen(s), 0);
+		if (adoc)
+			root = yyjson_doc_get_root(adoc);
+	} else if (yyjson_is_obj(args)) {
+		root = args;
+	}
+
+	if (!root)
+		return 0;
+
+	yyjson_val *q = yyjson_obj_get(root, "query");
+	if (q && yyjson_is_str(q))
+		out->query = yyjson_get_str(q);
+
+	yyjson_val *st = yyjson_obj_get(root, "start");
+	if (st && yyjson_is_int(st)) {
+		int64_t v = yyjson_get_sint(st);
+		if (v > 0)
+			out->start = (size_t)v;
+	}
+
+	yyjson_val *sz = yyjson_obj_get(root, "size");
+	if (sz && yyjson_is_int(sz)) {
+		int64_t v = yyjson_get_sint(sz);
+		if (v > 0)
+			out->size = (size_t)v;
+	}
+
+	if (adoc)
+		yyjson_doc_free(adoc);
+	return 0;
+}
+
+static int dup_list_request_strings(aicli_list_allowed_files_request_t *r)
+{
+	if (!r)
+		return 1;
+	if (r->query)
+		r->query = dup_cstr(r->query);
+	return 0;
+}
+
+static void list_job_main(void *arg)
+{
+	list_job_t *j = (list_job_t *)arg;
+	if (!j)
+		return;
+	j->done = false;
+	memset(&j->res, 0, sizeof(j->res));
+
+	int rc = aicli_list_allowed_files_json(j->allow, &j->req, &j->res);
+	if (rc != 0) {
+		aicli_list_allowed_files_result_free(&j->res);
+		j->res.json = dup_cstr("{\"ok\":false,\"error\":\"internal_error\"}");
+	}
+
+	j->done = true;
+}
+
+static char *build_function_call_output_item_json_raw(const char *call_id, const char *raw_json)
+{
+	// Build:
+	// {"type":"function_call_output","call_id":"...","output":"{...json...}"}
+	// NOTE: output must be a JSON string, so raw_json is double-escaped.
+	if (!call_id || !call_id[0])
+		return NULL;
+	if (!raw_json)
+		raw_json = "";
+
+	aicli_buf_t b;
+	if (!aicli_buf_init(&b, 512))
+		return NULL;
+
+	bool ok = true;
+	ok = ok && aicli_buf_append_str(&b, "{\"type\":\"function_call_output\",\"call_id\":\"");
+	ok = ok && buf_append_json_string_escaped_cstr(&b, call_id);
+	ok = ok && aicli_buf_append_str(&b, "\",\"output\":\"");
+
+	// Escape raw_json as content for the outer JSON string.
+	ok = ok && buf_append_json_string_escaped_cstr(&b, raw_json);
+
+	ok = ok && aicli_buf_append_str(&b, "\"}");
+	if (!ok) {
+		aicli_buf_free(&b);
+		return NULL;
+	}
+	if (!aicli_buf_append(&b, "\0", 1)) {
+		aicli_buf_free(&b);
+		return NULL;
+	}
+	return b.data;
+}
 
 static void free_execute_request_owned(aicli_execute_request_t *r)
 {
@@ -927,18 +1089,57 @@ int aicli_openai_run_with_tools(const aicli_config_t *cfg,
 		}
 
 		exec_job_t *jobs = (exec_job_t *)calloc(max_tool_calls_per_turn, sizeof(exec_job_t));
+		list_job_t *ljobs = (list_job_t *)calloc(max_tool_calls_per_turn, sizeof(list_job_t));
 		char **call_ids = (char **)calloc(max_tool_calls_per_turn, sizeof(char *));
 		char **items_json = (char **)calloc(max_tool_calls_per_turn, sizeof(char *));
-		if (!jobs || !call_ids || !items_json) {
+		if (!jobs || !ljobs || !call_ids || !items_json) {
 			free(jobs);
+			free(ljobs);
 			free(call_ids);
 			free(items_json);
 			yyjson_doc_free(doc);
 			break;
 		}
 
-		size_t call_count = 0;
-		(void)collect_execute_calls(root, jobs, (const char **)call_ids, max_tool_calls_per_turn, &call_count);
+		size_t exec_count = 0;
+		(void)collect_execute_calls(root, jobs, (const char **)call_ids, max_tool_calls_per_turn, &exec_count);
+
+		size_t list_count = 0;
+		{
+			yyjson_val *outarr = find_output_array(root);
+			if (outarr) {
+				size_t idx, max = yyjson_arr_size(outarr);
+				for (idx = 0; idx < max && (exec_count + list_count) < max_tool_calls_per_turn; idx++) {
+					yyjson_val *item = yyjson_arr_get(outarr, idx);
+					if (!item || !yyjson_is_obj(item))
+						continue;
+					yyjson_val *type = yyjson_obj_get(item, "type");
+					const char *t = (type && yyjson_is_str(type)) ? yyjson_get_str(type) : NULL;
+					if (!t || strcmp(t, "function_call") != 0)
+						continue;
+					yyjson_val *name = yyjson_obj_get(item, "name");
+					const char *nstr = (name && yyjson_is_str(name)) ? yyjson_get_str(name) : NULL;
+					if (!nstr || strcmp(nstr, "list_allowed_files") != 0)
+						continue;
+					yyjson_val *call_id = yyjson_obj_get(item, "call_id");
+					const char *cid = (call_id && yyjson_is_str(call_id)) ? yyjson_get_str(call_id) : NULL;
+					if (!cid || !cid[0])
+						continue;
+					yyjson_val *args = yyjson_obj_get(item, "arguments");
+
+					ljobs[list_count].allow = allow;
+					ljobs[list_count].done = false;
+					ljobs[list_count].req = (aicli_list_allowed_files_request_t){0};
+					(void)parse_list_allowed_files_arguments(args, &ljobs[list_count].req);
+					(void)dup_list_request_strings(&ljobs[list_count].req);
+
+					call_ids[exec_count + list_count] = dup_cstr(cid);
+					list_count++;
+				}
+			}
+		}
+
+		size_t call_count = exec_count + list_count;
 		if (call_count == 0) {
 			const char *bad_call_id = find_first_execute_call_id(root);
 			if (bad_call_id && bad_call_id[0]) {
@@ -947,6 +1148,7 @@ int aicli_openai_run_with_tools(const aicli_config_t *cfg,
 				        safe_str(bad_call_id));
 			}
 			free(jobs);
+			free(ljobs);
 			for (size_t k = 0; k < max_tool_calls_per_turn; k++)
 				free(call_ids[k]);
 			free(call_ids);
@@ -966,9 +1168,12 @@ int aicli_openai_run_with_tools(const aicli_config_t *cfg,
 			break;
 		}
 
-		for (size_t i = 0; i < call_count; i++) {
+		for (size_t i = 0; i < exec_count; i++) {
 			jobs[i].allow = allow;
 			(void)aicli_threadpool_submit(tp, exec_job_main, &jobs[i]);
+		}
+		for (size_t i = 0; i < list_count; i++) {
+			(void)aicli_threadpool_submit(tp, list_job_main, &ljobs[i]);
 		}
 		aicli_threadpool_drain(tp);
 		aicli_threadpool_destroy(tp);
@@ -986,8 +1191,12 @@ int aicli_openai_run_with_tools(const aicli_config_t *cfg,
 			}
 		}
 
-		for (size_t i = 0; i < call_count; i++) {
+		for (size_t i = 0; i < exec_count; i++) {
 			items_json[i] = build_function_call_output_item_json(call_ids[i], &jobs[i].res);
+		}
+		for (size_t i = 0; i < list_count; i++) {
+			items_json[exec_count + i] = build_function_call_output_item_json_raw(call_ids[exec_count + i],
+			                                                                   ljobs[i].res.json);
 		}
 		for (size_t i = 0; i < call_count; i++) {
 			if (!items_json[i] || !items_json[i][0]) {
@@ -998,11 +1207,14 @@ int aicli_openai_run_with_tools(const aicli_config_t *cfg,
 					if (jobs[k].res.stdout_text)
 						free((void *)jobs[k].res.stdout_text);
 					free_execute_request_owned(&jobs[k].req);
+					aicli_list_allowed_files_result_free(&ljobs[k].res);
+					free_list_request_owned(&ljobs[k].req);
 					free(items_json[k]);
 					free(call_ids[k]);
 				}
 				free(items_json);
 				free(jobs);
+				free(ljobs);
 				free(call_ids);
 				yyjson_doc_free(doc);
 				aicli_openai_http_response_free(&http);

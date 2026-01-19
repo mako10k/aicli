@@ -59,6 +59,20 @@ echo "$bytes" | grep -qE '^[0-9]+$'
 lines=$("$bin" _exec --file ../README.md "cat ../README.md | wc -l" 2>/dev/null | tr -d '\n')
 echo "$lines" | grep -qE '^[0-9]+$'
 
+# stdin: explicit --stdin and implicit (no --file)
+stdin1=$(printf "z\ny\n" | "$bin" _exec --stdin "cat - | head -n 1" 2>/dev/null | tr -d '\r')
+test "$stdin1" = "z"
+
+stdin2=$(printf "a\nb\n" | "$bin" _exec "cat - | tail -n 1" 2>/dev/null | tr -d '\r')
+test "$stdin2" = "b"
+
+# run + stdin: only a smoke test (requires OPENAI_API_KEY). If missing, skip.
+if [[ -n "${OPENAI_API_KEY:-}" ]]; then
+	run_out=$(printf "HELLO_FROM_STDIN\n" | "$bin" run --stdin --turns 1 --max-tool-calls 1 --tool-threads 1 --force-tool none "Say OK" 2>/dev/null | tr -d '\r')
+	# We don't assert content strongly (model-dependent), just that it runs.
+	test -n "$run_out"
+fi
+
 # path traversal should be rejected unless it resolves to allowed realpath
 mkdir -p tmp
 echo "X" > tmp/x.txt

@@ -50,6 +50,19 @@ typedef struct {
 } aicli_tool_result_t;
 
 typedef struct {
+	// Optional case-insensitive substring match against allowlisted file path.
+	const char *query;
+	// 0-based start index for paging.
+	size_t start;
+	// Max items to return.
+	size_t size;
+} aicli_list_allowed_files_request_t;
+
+typedef struct {
+	const char *json; // JSON object string (owned by caller)
+} aicli_list_allowed_files_result_t;
+
+typedef struct {
 	const char *id;
 	const char *command;
 	const char *file; // optional hint

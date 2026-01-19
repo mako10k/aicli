@@ -12,6 +12,7 @@ aicli_SOURCES = \
 	threadpool.c \
 	../vendor/yyjson/yyjson.c \
 	buf.c \
+	allowlist_list_tool.c \
 	execute_dsl.c \
 	execute/allowlist.c \
 	execute/dispatch.c \

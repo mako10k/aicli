@@ -1,6 +1,7 @@
 #include "cli.h"
 
 #include <errno.h>
+#include <fcntl.h>
 #include <unistd.h>
 #include <sys/ioctl.h>
 #include <stdio.h>
@@ -263,15 +264,32 @@ static size_t detect_tty_width_or_default(size_t fallback)
 static int cmd_exec_local(int argc, char **argv)
 {
 	// Internal helper for MVP testing:
-	// aicli _exec --file PATH --start N --size N "cat PATH"
+	// aicli _exec [--file PATH ...] [--file - | --stdin] [--start N] [--size N] "CMD"
+	// Notes:
+	//  - Multiple files: repeat --file (e.g. --file A --file B). "--file A B" is NOT supported.
+	//  - stdin: default when no --file is given, or explicitly via --stdin / --file -.
+	//  - CMD may use '-' to refer to stdin; it will be rewritten to a temp file path.
 	aicli_allowed_file_t files[16];
 	int file_count = 0;
 	size_t start = 0;
 	size_t size = 4096;
+	bool use_stdin = false;
+	char stdin_tmp_path[256];
+	stdin_tmp_path[0] = '\0';
 
 	int i = 2;
 	while (i < argc && strncmp(argv[i], "--", 2) == 0) {
+		if (strcmp(argv[i], "--stdin") == 0) {
+			use_stdin = true;
+			i++;
+			continue;
+		}
 		if (strcmp(argv[i], "--file") == 0 && i + 1 < argc) {
+			if (strcmp(argv[i + 1], "-") == 0) {
+				use_stdin = true;
+				i += 2;
+				continue;
+			}
 			if (file_count < 16) {
 				// Resolve relative paths against the current working directory so that
 				// allowlist entries match what execute() will resolve (it uses realpath()).
@@ -313,14 +331,118 @@ static int cmd_exec_local(int argc, char **argv)
 		break;
 	}
 
+	// If no files were specified, default to reading stdin.
+	if (file_count == 0)
+		use_stdin = true;
+
+	// If stdin is in use, materialize it as a temp file and allowlist it.
+	if (use_stdin) {
+		if (snprintf(stdin_tmp_path, sizeof(stdin_tmp_path), "/tmp/aicli-stdin-%ld-XXXXXX",
+		             (long)getpid()) <= 0) {
+			fprintf(stderr, "failed to build stdin tempfile template\n");
+			return 2;
+		}
+		int fd = mkstemp(stdin_tmp_path);
+		if (fd < 0) {
+			fprintf(stderr, "failed to create stdin tempfile\n");
+			return 2;
+		}
+
+		size_t total = 0;
+		char buf[8192];
+		while (1) {
+			ssize_t r = read(STDIN_FILENO, buf, sizeof(buf));
+			if (r < 0) {
+				close(fd);
+				unlink(stdin_tmp_path);
+				fprintf(stderr, "failed to read stdin\n");
+				return 2;
+			}
+			if (r == 0)
+				break;
+			total += (size_t)r;
+			if (total > (1024 * 1024)) {
+				close(fd);
+				unlink(stdin_tmp_path);
+				fprintf(stderr, "stdin_too_large\n");
+				return 4;
+			}
+			ssize_t off = 0;
+			while (off < r) {
+				ssize_t w = write(fd, buf + off, (size_t)(r - off));
+				if (w <= 0) {
+					close(fd);
+					unlink(stdin_tmp_path);
+					fprintf(stderr, "failed to write stdin tempfile\n");
+					return 2;
+				}
+				off += w;
+			}
+		}
+		close(fd);
+
+		char *rp = aicli_realpath_dup(stdin_tmp_path);
+		if (!rp) {
+			unlink(stdin_tmp_path);
+			fprintf(stderr, "invalid stdin tempfile path\n");
+			return 2;
+		}
+		if (file_count < 16) {
+			files[file_count].path = rp;
+			files[file_count].name = "-";
+			files[file_count].size_bytes = total;
+			file_count++;
+		} else {
+			free(rp);
+			unlink(stdin_tmp_path);
+			fprintf(stderr, "too_many_files\n");
+			return 2;
+		}
+	}
+
 	if (i >= argc) {
 		fprintf(stderr, "missing command\n");
+		if (stdin_tmp_path[0])
+			unlink(stdin_tmp_path);
 		return 2;
+	}
+
+	const char *cmd = argv[i];
+	char *cmd_dyn = NULL;
+	if (use_stdin && stdin_tmp_path[0] && cmd) {
+		// Replace standalone '-' tokens with the tempfile path.
+		// Supports shapes like: "cat - | head -n 5".
+		size_t src_len = strlen(cmd);
+		size_t need = src_len + strlen(stdin_tmp_path) + 64;
+		cmd_dyn = (char *)malloc(need);
+		if (!cmd_dyn) {
+			if (stdin_tmp_path[0])
+				unlink(stdin_tmp_path);
+			fprintf(stderr, "oom\n");
+			return 1;
+		}
+		const char *s = cmd;
+		char *d = cmd_dyn;
+		while (*s) {
+			bool at_start = (s == cmd);
+			bool left_ok = at_start || s[-1] == ' ' || s[-1] == '\t' || s[-1] == '|';
+			bool is_dash = (s[0] == '-' && (s[1] == '\0' || s[1] == ' ' || s[1] == '\t' || s[1] == '|'));
+			if (left_ok && is_dash) {
+				size_t n = strlen(stdin_tmp_path);
+				memcpy(d, stdin_tmp_path, n);
+				d += n;
+				s += 1;
+				continue;
+			}
+			*d++ = *s++;
+		}
+		*d = '\0';
+		cmd = cmd_dyn;
 	}
 
 	aicli_allowlist_t allow = {.files = files, .file_count = file_count};
 	aicli_execute_request_t req = {
-	    .command = argv[i],
+	    .command = cmd,
 	    .file = NULL,
 	    .idempotency = NULL,
 	    .start = start,
@@ -338,6 +460,9 @@ static int cmd_exec_local(int argc, char **argv)
 	for (int fi = 0; fi < file_count; fi++) {
 		free((void *)files[fi].path);
 	}
+	free(cmd_dyn);
+	if (stdin_tmp_path[0])
+		unlink(stdin_tmp_path);
 
 	if (res.has_next_start) {
 		fprintf(stderr, "\n[total_bytes=%zu next_start=%zu]\n", res.total_bytes,
@@ -353,9 +478,10 @@ static void usage(FILE *out)
 	fprintf(out,
 	        "aicli - lightweight native OpenAI client\n\n"
 	        "Usage:\n"
+	        "  aicli _exec [--file PATH ...] [--file - | --stdin] [--start N] [--size N] <cmd>\n"
 	        "  aicli chat <prompt>\n"
 	        "  aicli web search <query> [--count N] [--lang xx] [--freshness day|week|month] [--max-title N] [--max-url N] [--max-snippet N] [--width N] [--raw]\n"
-	        "  aicli run [--file PATH ...] [--turns N] [--max-tool-calls N] [--tool-threads N]\n"
+	        "  aicli run [--file PATH ...] [--file - | --stdin] [--turns N] [--max-tool-calls N] [--tool-threads N]\n"
 	        "           [--disable-all-tools] [--available-tools TOOL[,TOOL...]] [--force-tool TOOL]\n"
 	        "           [--config PATH] [--no-config]\n"
 	        "           [--debug-all[=LEVEL]] [--debug-api[=LEVEL]] [--debug-function-call[=LEVEL]] [--auto-search] <prompt>\n"
@@ -603,7 +729,8 @@ static int locale_to_google_lr(const char *locale, char out[32])
 
 static int cmd_run(int argc, char **argv, const aicli_config_t *cfg)
 {
-	// aicli run [--file PATH ...] [--turns N] [--max-tool-calls N] [--tool-threads N] [--auto-search] <prompt>
+	// aicli run [--file PATH ...] [--file - | --stdin]
+	//          [--turns N] [--max-tool-calls N] [--tool-threads N] [--auto-search] <prompt>
 	if (!cfg || !cfg->openai_api_key || !cfg->openai_api_key[0]) {
 		fprintf(stderr, "OPENAI_API_KEY is required\n");
 		return 2;
@@ -616,6 +743,9 @@ static int cmd_run(int argc, char **argv, const aicli_config_t *cfg)
 	char *allow_paths[32];
 	memset(allow_paths, 0, sizeof(allow_paths));
 	bool auto_search = false;
+	bool use_stdin = false;
+	char stdin_tmp_path[256];
+	stdin_tmp_path[0] = '\0';
 	const char *available_tools = NULL;
 	const char *force_tool = NULL;
 	int disable_all_tools = 0;
@@ -627,7 +757,17 @@ static int cmd_run(int argc, char **argv, const aicli_config_t *cfg)
 
 	int i = 2;
 	while (i < argc && strncmp(argv[i], "--", 2) == 0) {
+		if (strcmp(argv[i], "--stdin") == 0) {
+			use_stdin = true;
+			i += 1;
+			continue;
+		}
 		if (strcmp(argv[i], "--file") == 0 && i + 1 < argc) {
+			if (strcmp(argv[i + 1], "-") == 0) {
+				use_stdin = true;
+				i += 2;
+				continue;
+			}
 			if (file_count >= (int)(sizeof(files) / sizeof(files[0]))) {
 				fprintf(stderr, "too many --file entries (max %zu)\n",
 				        sizeof(files) / sizeof(files[0]));
@@ -766,6 +906,69 @@ static int cmd_run(int argc, char **argv, const aicli_config_t *cfg)
 		return 2;
 	}
 	const char *prompt = argv[i];
+
+	// stdin -> temp file -> allowlist
+	if (use_stdin) {
+		if (file_count >= (int)(sizeof(files) / sizeof(files[0]))) {
+			fprintf(stderr, "too many --file entries (max %zu)\n",
+			        sizeof(files) / sizeof(files[0]));
+			return 2;
+		}
+		if (snprintf(stdin_tmp_path, sizeof(stdin_tmp_path), "/tmp/aicli-stdin-%ld-XXXXXX",
+		             (long)getpid()) <= 0) {
+			fprintf(stderr, "failed to build stdin tempfile template\n");
+			return 2;
+		}
+		int fd = mkstemp(stdin_tmp_path);
+		if (fd < 0) {
+			fprintf(stderr, "failed to create stdin tempfile\n");
+			return 2;
+		}
+		size_t total = 0;
+		char buf[8192];
+		while (1) {
+			ssize_t r = read(STDIN_FILENO, buf, sizeof(buf));
+			if (r < 0) {
+				close(fd);
+				unlink(stdin_tmp_path);
+				fprintf(stderr, "failed to read stdin\n");
+				return 2;
+			}
+			if (r == 0)
+				break;
+			total += (size_t)r;
+			if (total > (1024 * 1024)) {
+				close(fd);
+				unlink(stdin_tmp_path);
+				fprintf(stderr, "stdin_too_large\n");
+				return 4;
+			}
+			ssize_t off = 0;
+			while (off < r) {
+				ssize_t w = write(fd, buf + off, (size_t)(r - off));
+				if (w <= 0) {
+					close(fd);
+					unlink(stdin_tmp_path);
+					fprintf(stderr, "failed to write stdin tempfile\n");
+					return 2;
+				}
+				off += w;
+			}
+		}
+		close(fd);
+
+		char *rp = aicli_realpath_dup(stdin_tmp_path);
+		if (!rp) {
+			unlink(stdin_tmp_path);
+			fprintf(stderr, "invalid stdin tempfile path\n");
+			return 2;
+		}
+		files[file_count].path = rp;
+		allow_paths[file_count] = rp;
+		files[file_count].name = "-";
+		files[file_count].size_bytes = total;
+		file_count++;
+	}
 
 	char *augmented_prompt = NULL;
 	if (auto_search) {
@@ -1014,6 +1217,8 @@ static int cmd_run(int argc, char **argv, const aicli_config_t *cfg)
 	// Free allowlisted paths after the tool loop finishes.
 	for (int fi = 0; fi < file_count; fi++)
 		free(allow_paths[fi]);
+	if (stdin_tmp_path[0])
+		unlink(stdin_tmp_path);
 
 	if (rc != 0) {
 		fprintf(stderr, "openai request failed\n");

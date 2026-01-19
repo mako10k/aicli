@@ -12,5 +12,6 @@ nobase_include_HEADERS = \
 	threadpool.h \
 	path_util.h \
 	google_search.h \
+	allowlist_list_tool.h \
 	execute_dsl.h \
 	execute_tool.h
