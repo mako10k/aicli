@@ -190,7 +190,7 @@ static void usage(FILE *out)
 	        "aicli - lightweight native OpenAI client\n\n"
 	        "Usage:\n"
 	        "  aicli chat <prompt>\n"
-	        "  aicli web search <query> [--count N] [--lang xx] [--freshness day|week|month] [--max-snippet N] [--width N] [--raw]\n"
+	        "  aicli web search <query> [--count N] [--lang xx] [--freshness day|week|month] [--max-title N] [--max-url N] [--max-snippet N] [--width N] [--raw]\n"
 	        "  aicli run [--auto-search] [--file PATH ...] <prompt>\n");
 }
 
@@ -210,6 +210,8 @@ static int cmd_web_search(int argc, char **argv, const aicli_config_t *cfg)
 	const char *lang = NULL;
 	const char *freshness = NULL;
 	int raw_json = 0;
+	size_t max_title = 160;
+	size_t max_url = 500;
 	size_t max_snippet = 500;
 	size_t width = 0;
 
@@ -231,6 +233,36 @@ static int cmd_web_search(int argc, char **argv, const aicli_config_t *cfg)
 		}
 		if (strcmp(argv[i], "--raw") == 0) {
 			raw_json = 1;
+			continue;
+		}
+		if (strcmp(argv[i], "--max-title") == 0 && i + 1 < argc) {
+			errno = 0;
+			unsigned long long v = strtoull(argv[i + 1], NULL, 10);
+			if (errno != 0) {
+				fprintf(stderr, "invalid --max-title\n");
+				return 2;
+			}
+			max_title = (size_t)v;
+			if (max_title < 40)
+				max_title = 40;
+			if (max_title > 1000)
+				max_title = 1000;
+			i++;
+			continue;
+		}
+		if (strcmp(argv[i], "--max-url") == 0 && i + 1 < argc) {
+			errno = 0;
+			unsigned long long v = strtoull(argv[i + 1], NULL, 10);
+			if (errno != 0) {
+				fprintf(stderr, "invalid --max-url\n");
+				return 2;
+			}
+			max_url = (size_t)v;
+			if (max_url < 40)
+				max_url = 40;
+			if (max_url > 5000)
+				max_url = 5000;
+			i++;
 			continue;
 		}
 		if (strcmp(argv[i], "--max-snippet") == 0 && i + 1 < argc) {
@@ -343,8 +375,8 @@ static int cmd_web_search(int argc, char **argv, const aicli_config_t *cfg)
 					desc = "";
 
 				printf("%zu) ", idx + 1);
-				fprint_wrapped(stdout, "", title, 160, width);
-				fprint_wrapped(stdout, "    ", url, 500, width);
+				fprint_wrapped(stdout, "", title, max_title, width);
+				fprint_wrapped(stdout, "    ", url, max_url, width);
 				fprint_wrapped(stdout, "    ", desc, max_snippet, width);
 				fputc('\n', stdout);
 			}
