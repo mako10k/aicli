@@ -6,7 +6,12 @@
 
 #include "aicli.h"
 #include "aicli_config.h"
+#include "brave_search.h"
 #include "execute_tool.h"
+
+#if HAVE_YYJSON_H
+#include <yyjson.h>
+#endif
 
 static int cmd_exec_local(int argc, char **argv)
 {
@@ -92,6 +97,138 @@ static void usage(FILE *out)
 	        "  aicli run [--auto-search] [--file PATH ...] <prompt>\n");
 }
 
+static int cmd_web_search(int argc, char **argv, const aicli_config_t *cfg)
+{
+	if (argc < 4) {
+		fprintf(stderr, "missing query\n");
+		return 2;
+	}
+	if (!cfg || !cfg->brave_api_key || !cfg->brave_api_key[0]) {
+		fprintf(stderr, "BRAVE_API_KEY is required\n");
+		return 2;
+	}
+
+	const char *query = argv[3];
+	int count = 5;
+	const char *lang = NULL;
+	const char *freshness = NULL;
+	int raw_json = 0;
+
+	for (int i = 4; i < argc; i++) {
+		if (strcmp(argv[i], "--count") == 0 && i + 1 < argc) {
+			count = atoi(argv[i + 1]);
+			i++;
+			continue;
+		}
+		if (strcmp(argv[i], "--lang") == 0 && i + 1 < argc) {
+			lang = argv[i + 1];
+			i++;
+			continue;
+		}
+		if (strcmp(argv[i], "--freshness") == 0 && i + 1 < argc) {
+			freshness = argv[i + 1];
+			i++;
+			continue;
+		}
+		if (strcmp(argv[i], "--raw") == 0) {
+			raw_json = 1;
+			continue;
+		}
+		fprintf(stderr, "unknown option: %s\n", argv[i]);
+		return 2;
+	}
+
+	aicli_brave_response_t res;
+	int rc = aicli_brave_web_search(cfg->brave_api_key, query, count, lang,
+				 freshness, &res);
+	if (rc != 0) {
+		fprintf(stderr, "brave search failed: %s\n", res.error[0] ? res.error : "unknown");
+		aicli_brave_response_free(&res);
+		return 2;
+	}
+
+	if (res.http_status != 200) {
+		fprintf(stderr, "brave http_status=%d\n", res.http_status);
+		if (res.body && res.body_len)
+			fwrite(res.body, 1, res.body_len, stdout);
+		fputc('\n', stdout);
+		aicli_brave_response_free(&res);
+		return 1;
+	}
+
+	// Heuristic: small JSON is OK to print as-is; otherwise print a compact view.
+	if (raw_json || res.body_len <= 4096) {
+		if (res.body && res.body_len)
+			fwrite(res.body, 1, res.body_len, stdout);
+		fputc('\n', stdout);
+		aicli_brave_response_free(&res);
+		return 0;
+	}
+
+#if HAVE_YYJSON_H
+	// If yyjson is available, extract and print a compact view.
+	yyjson_read_err err;
+	yyjson_doc *doc = yyjson_read(res.body, res.body_len, 0, NULL, &err);
+	if (!doc) {
+		fprintf(stderr, "yyjson parse error: %s at %zu\n", err.msg, (size_t)err.pos);
+		// Fall back to truncation below.
+	} else {
+		yyjson_val *root = yyjson_doc_get_root(doc);
+		yyjson_val *web = yyjson_obj_get(root, "web");
+		yyjson_val *results = web ? yyjson_obj_get(web, "results") : NULL;
+		if (!results || !yyjson_is_arr(results)) {
+			fprintf(stderr, "unexpected JSON shape: missing web.results[]\n");
+		} else {
+			size_t idx, max;
+			yyjson_val *it;
+			max = yyjson_arr_size(results);
+			if (max > (size_t)count)
+				max = (size_t)count;
+			for (idx = 0; idx < max; idx++) {
+				it = yyjson_arr_get(results, idx);
+				const char *title = NULL;
+				const char *url = NULL;
+				const char *desc = NULL;
+				yyjson_val *v;
+				v = yyjson_obj_get(it, "title");
+				if (v && yyjson_is_str(v))
+					title = yyjson_get_str(v);
+				v = yyjson_obj_get(it, "url");
+				if (v && yyjson_is_str(v))
+					url = yyjson_get_str(v);
+				v = yyjson_obj_get(it, "description");
+				if (v && yyjson_is_str(v))
+					desc = yyjson_get_str(v);
+
+				if (!title)
+					title = "";
+				if (!url)
+					url = "";
+				if (!desc)
+					desc = "";
+
+				printf("%zu. %s\n   %s\n   %s\n\n", idx + 1, title, url, desc);
+			}
+			yyjson_doc_free(doc);
+			aicli_brave_response_free(&res);
+			return 0;
+		}
+		yyjson_doc_free(doc);
+	}
+#endif
+
+	// Fallback without a JSON parser: print the first ~4KB.
+	size_t n = res.body_len;
+	if (n > 4096)
+		n = 4096;
+	fwrite(res.body, 1, n, stdout);
+	fprintf(stdout, "\n... (truncated, %zu bytes total; add --raw for full JSON)\n",
+	        res.body_len);
+
+	aicli_brave_response_free(&res);
+	return 0;
+}
+
 int aicli_cli_main(int argc, char **argv)
 {
 	if (argc < 2) {
@@ -108,15 +245,23 @@ int aicli_cli_main(int argc, char **argv)
 		return cmd_exec_local(argc, argv);
 	}
 
-	// Stub scaffold: actual subcommands will be wired in MVP implementation.
-	fprintf(stderr, "scaffold: subcommands not implemented yet (%s)\n", argv[1]);
-	fprintf(stderr, "See docs/design.md for the target spec.\n");
-
 	aicli_config_t cfg;
 	if (!aicli_config_load_from_env(&cfg)) {
 		// It's OK for scaffold; real implementation will require OPENAI_API_KEY for
 		// chat/run.
 	}
+
+	if (strcmp(argv[1], "web") == 0) {
+		if (argc >= 3 && strcmp(argv[2], "search") == 0) {
+			return cmd_web_search(argc, argv, &cfg);
+		}
+		fprintf(stderr, "unknown web subcommand\n");
+		return 2;
+	}
+
+	// Stub scaffold: other subcommands will be wired in MVP implementation.
+	fprintf(stderr, "scaffold: subcommands not implemented yet (%s)\n", argv[1]);
+	fprintf(stderr, "See docs/design.md for the target spec.\n");
 
 	return 0;
 }

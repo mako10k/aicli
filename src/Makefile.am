@@ -5,6 +5,7 @@ aicli_SOURCES = \
 	cli.c \
 	config.c \
 	brave_search.c \
+	../vendor/yyjson/yyjson.c \
 	buf.c \
 	execute_dsl.c \
 	execute/allowlist.c \
@@ -17,6 +18,6 @@ aicli_SOURCES = \
 	path_util.c \
 	paging_cache.c
 
-aicli_CPPFLAGS = -I$(top_srcdir)/include $(CURL_CFLAGS)
+aicli_CPPFLAGS = -I$(top_srcdir)/include -I$(top_srcdir)/vendor/yyjson $(CURL_CFLAGS)
 
 aicli_LDADD = $(CURL_LIBS)
