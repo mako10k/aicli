@@ -1,5 +1,8 @@
 #include "cli.h"
 
+#include <errno.h>
+#include <unistd.h>
+#include <sys/ioctl.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -91,6 +94,22 @@ static void fprint_wrapped(FILE *out, const char *indent, const char *text,
 	fputc('\n', out);
 }
 
+static size_t detect_tty_width_or_default(size_t fallback)
+{
+	if (fallback < 20)
+		fallback = 80;
+	if (!isatty(STDOUT_FILENO))
+		return fallback;
+
+	struct winsize ws;
+	memset(&ws, 0, sizeof(ws));
+	if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &ws) != 0)
+		return fallback;
+	if (ws.ws_col < 20)
+		return fallback;
+	return (size_t)ws.ws_col;
+}
+
 static int cmd_exec_local(int argc, char **argv)
 {
 	// Internal helper for MVP testing:
@@ -171,7 +190,7 @@ static void usage(FILE *out)
 	        "aicli - lightweight native OpenAI client\n\n"
 	        "Usage:\n"
 	        "  aicli chat <prompt>\n"
-	        "  aicli web search <query> [--count N] [--lang xx] [--freshness day|week|month]\n"
+	        "  aicli web search <query> [--count N] [--lang xx] [--freshness day|week|month] [--max-snippet N] [--width N] [--raw]\n"
 	        "  aicli run [--auto-search] [--file PATH ...] <prompt>\n");
 }
 
@@ -191,6 +210,8 @@ static int cmd_web_search(int argc, char **argv, const aicli_config_t *cfg)
 	const char *lang = NULL;
 	const char *freshness = NULL;
 	int raw_json = 0;
+	size_t max_snippet = 500;
+	size_t width = 0;
 
 	for (int i = 4; i < argc; i++) {
 		if (strcmp(argv[i], "--count") == 0 && i + 1 < argc) {
@@ -212,9 +233,42 @@ static int cmd_web_search(int argc, char **argv, const aicli_config_t *cfg)
 			raw_json = 1;
 			continue;
 		}
+		if (strcmp(argv[i], "--max-snippet") == 0 && i + 1 < argc) {
+			errno = 0;
+			unsigned long long v = strtoull(argv[i + 1], NULL, 10);
+			if (errno != 0) {
+				fprintf(stderr, "invalid --max-snippet\n");
+				return 2;
+			}
+			max_snippet = (size_t)v;
+			if (max_snippet < 40)
+				max_snippet = 40;
+			if (max_snippet > 5000)
+				max_snippet = 5000;
+			i++;
+			continue;
+		}
+		if (strcmp(argv[i], "--width") == 0 && i + 1 < argc) {
+			errno = 0;
+			unsigned long long v = strtoull(argv[i + 1], NULL, 10);
+			if (errno != 0) {
+				fprintf(stderr, "invalid --width\n");
+				return 2;
+			}
+			width = (size_t)v;
+			if (width < 40)
+				width = 40;
+			if (width > 200)
+				width = 200;
+			i++;
+			continue;
+		}
 		fprintf(stderr, "unknown option: %s\n", argv[i]);
 		return 2;
 	}
+
+	if (width == 0)
+		width = detect_tty_width_or_default(80);
 
 	aicli_brave_response_t res;
 	int rc = aicli_brave_web_search(cfg->brave_api_key, query, count, lang,
@@ -289,9 +343,9 @@ static int cmd_web_search(int argc, char **argv, const aicli_config_t *cfg)
 					desc = "";
 
 				printf("%zu) ", idx + 1);
-				fprint_wrapped(stdout, "", title, 160, 80);
-				fprint_wrapped(stdout, "    ", url, 500, 90);
-				fprint_wrapped(stdout, "    ", desc, 500, 90);
+				fprint_wrapped(stdout, "", title, 160, width);
+				fprint_wrapped(stdout, "    ", url, 500, width);
+				fprint_wrapped(stdout, "    ", desc, max_snippet, width);
 				fputc('\n', stdout);
 			}
 			yyjson_doc_free(doc);
