@@ -7,6 +7,8 @@ aicli_SOURCES = \
 	brave_search.c \
 	buf.c \
 	execute_dsl.c \
+	execute/file_reader.c \
+	execute/paging.c \
 	execute/pipeline_stages.c \
 	execute_tool_impl.c \
 	path_util.c \

@@ -1,6 +1,8 @@
 #include "execute_tool.h"
 
 #include "buf.h"
+#include "execute/file_reader.h"
+#include "execute/paging.h"
 #include "execute/pipeline_stages.h"
 
 #include <errno.h>
@@ -18,75 +20,6 @@ static bool allowlist_contains(const aicli_allowlist_t *allow, const char *path)
 			return true;
 	}
 	return false;
-}
-
-static int read_file_range(const char *path, size_t start, size_t max_bytes, char **out_buf,
-                           size_t *out_len, size_t *out_total)
-{
-	FILE *fp = fopen(path, "rb");
-	if (!fp)
-		return -1;
-
-	if (fseek(fp, 0, SEEK_END) != 0) {
-		fclose(fp);
-		return -1;
-	}
-	long total = ftell(fp);
-	if (total < 0) {
-		fclose(fp);
-		return -1;
-	}
-	*out_total = (size_t)total;
-
-	if ((long)start > total)
-		start = (size_t)total;
-	if (fseek(fp, (long)start, SEEK_SET) != 0) {
-		fclose(fp);
-		return -1;
-	}
-
-	size_t to_read = max_bytes;
-	if (start + to_read > (size_t)total)
-		to_read = (size_t)total - start;
-
-	char *buf = (char *)malloc(to_read + 1);
-	if (!buf) {
-		fclose(fp);
-		return -1;
-	}
-	size_t n = fread(buf, 1, to_read, fp);
-	buf[n] = '\0';
-	fclose(fp);
-
-	*out_buf = buf;
-	*out_len = n;
-	return 0;
-}
-
-static void apply_paging(const char *data, size_t total, size_t start, size_t size,
-                         aicli_tool_result_t *out)
-{
-	if (start > total)
-		start = total;
-	size_t remain = total - start;
-	size_t n = remain < size ? remain : size;
-
-	char *buf = (char *)malloc(n + 1);
-	if (!buf) {
-		out->stderr_text = "oom";
-		out->exit_code = 1;
-		return;
-	}
-	memcpy(buf, data + start, n);
-	buf[n] = '\0';
-
-	out->stdout_text = buf;
-	out->stdout_len = n;
-	out->exit_code = 0;
-	out->total_bytes = total;
-	out->truncated = (start + n) < total;
-	out->has_next_start = out->truncated;
-	out->next_start = start + n;
 }
 
 int aicli_execute_run(const aicli_allowlist_t *allow, const aicli_execute_request_t *req,
@@ -137,7 +70,8 @@ int aicli_execute_run(const aicli_allowlist_t *allow, const aicli_execute_reques
 	size_t file_len = 0;
 	{
 		size_t max_read = 1024 * 1024; // 1 MiB MVP limit
-		if (read_file_range(rp, 0, max_read, &file_buf, &file_len, &file_total) != 0) {
+				if (aicli_read_file_range(rp, 0, max_read, &file_buf, &file_len, &file_total) !=
+					0) {
 			free(rp);
 			out->stderr_text = strerror(errno);
 			out->exit_code = 1;
@@ -236,7 +170,7 @@ int aicli_execute_run(const aicli_allowlist_t *allow, const aicli_execute_reques
 		cur_len = tmp2.len;
 	}
 
-	apply_paging(cur, cur_len, req->start, size, out);
+	aicli_apply_paging(cur, cur_len, req->start, size, out);
 
 	aicli_buf_free(&tmp1);
 	aicli_buf_free(&tmp2);
