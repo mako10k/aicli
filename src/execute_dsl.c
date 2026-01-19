@@ -39,6 +39,7 @@ static aicli_cmd_kind_t cmd_kind_from_token(const char *tok) {
 	if (strcmp(tok, "wc") == 0) return AICLI_CMD_WC;
 	if (strcmp(tok, "sort") == 0) return AICLI_CMD_SORT;
 	if (strcmp(tok, "grep") == 0) return AICLI_CMD_GREP;
+	if (strcmp(tok, "sed") == 0) return AICLI_CMD_SED;
 	return AICLI_CMD_UNKNOWN;
 }
 

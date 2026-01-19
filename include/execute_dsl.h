@@ -20,6 +20,7 @@ typedef enum {
 	AICLI_CMD_WC,
 	AICLI_CMD_SORT,
 		AICLI_CMD_GREP,
+		AICLI_CMD_SED,
 	AICLI_CMD_UNKNOWN,
 } aicli_cmd_kind_t;
 

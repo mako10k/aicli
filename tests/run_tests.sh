@@ -42,6 +42,13 @@ test "$g1" = $'foo\nfoo bar'
 g2=$("$bin" _exec --file tmp/grep.txt "cat tmp/grep.txt | grep -n bar" 2>/dev/null | tr -d '\r')
 test "$g2" = $'2:bar\n3:foo bar'
 
+# pipe: sed (line address)
+printf "l1\nl2\nl3\n" > tmp/sed.txt
+s1=$("$bin" _exec --file tmp/sed.txt "cat tmp/sed.txt | sed -n '2p'" 2>/dev/null | tr -d '\r')
+test "$s1" = $'l2'
+s2=$("$bin" _exec --file tmp/sed.txt "cat tmp/sed.txt | sed -n '2d'" 2>/dev/null | tr -d '\r')
+test "$s2" = $'l1\nl3'
+
 # pipe: wc
 bytes=$("$bin" _exec --file ../README.md "cat ../README.md | wc -c" 2>/dev/null | tr -d '\n')
 echo "$bytes" | grep -qE '^[0-9]+$'

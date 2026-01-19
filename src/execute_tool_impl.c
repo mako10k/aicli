@@ -236,6 +236,55 @@ static bool stage_grep_fixed(const char *in, size_t in_len, const char *needle, 
 	return true;
 }
 
+static bool parse_sed_n_script(const char *script, size_t *out_addr, char *out_cmd) {
+	// Accept only: "Np" or "Nd" where N is 1-based integer.
+	if (!script || !*script) return false;
+	char *end = NULL;
+	unsigned long v = strtoul(script, &end, 10);
+	if (!end || end == script) return false;
+	if (*end != 'p' && *end != 'd') return false;
+	if (end[1] != '\0') return false;
+	*out_addr = (size_t)v;
+	*out_cmd = *end;
+	return v > 0;
+}
+
+static bool stage_sed_n_addr(const char *in, size_t in_len, size_t addr, char cmd, aicli_buf_t *out) {
+	// Implements: sed -n 'Np' (print only line N) / sed -n 'Nd' (delete line N; print others)
+	if (addr == 0) return false;
+
+	unsigned long line_no = 1;
+	size_t i = 0;
+	size_t line_start = 0;
+	while (i <= in_len) {
+		if (i == in_len || in[i] == '\n') {
+			size_t line_len = i - line_start;
+			const char *line = in + line_start;
+
+			bool emit = false;
+			if (cmd == 'p') {
+				emit = (line_no == addr);
+			} else if (cmd == 'd') {
+				emit = (line_no != addr);
+			} else {
+				return false;
+			}
+
+			if (emit) {
+				if (line_len > 0) {
+					if (!aicli_buf_append(out, line, line_len)) return false;
+				}
+				if (!aicli_buf_append(out, "\n", 1)) return false;
+			}
+
+			line_no++;
+			line_start = i + 1;
+		}
+		i++;
+	}
+	return true;
+}
+
 static size_t parse_head_n(const aicli_dsl_stage_t *st, bool *ok) {
 	*ok = true;
 	// head -n N
@@ -298,6 +347,13 @@ static bool parse_grep_args(const aicli_dsl_stage_t *st, const char **out_patter
 		return true;
 	}
 	return false;
+}
+
+static bool parse_sed_args(const aicli_dsl_stage_t *st, size_t *out_addr, char *out_cmd) {
+	// sed -n 'Np' | sed -n 'Nd'
+	if (st->argc != 3) return false;
+	if (strcmp(st->argv[1], "-n") != 0) return false;
+	return parse_sed_n_script(st->argv[2], out_addr, out_cmd);
 }
 
 static void apply_paging(const char *data, size_t total, size_t start, size_t size,
@@ -438,6 +494,14 @@ int aicli_execute_run(const aicli_allowlist_t *allow,
 				ok = false;
 			} else {
 				ok = stage_grep_fixed(cur, cur_len, pattern, with_n, &tmp1);
+			}
+		} else if (stg->kind == AICLI_CMD_SED) {
+			size_t addr = 0;
+			char cmd = 0;
+			if (!parse_sed_args(stg, &addr, &cmd)) {
+				ok = false;
+			} else {
+				ok = stage_sed_n_addr(cur, cur_len, addr, cmd, &tmp1);
 			}
 		} else {
 			ok = false;
