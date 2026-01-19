@@ -1,0 +1,4 @@
+- Verify scaffold exists.
+- Keep the project single-binary oriented.
+- `execute` must be read-only and limited to allowlisted files.
+- Prefer environment variables for secrets.
