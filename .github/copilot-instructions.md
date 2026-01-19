@@ -4,5 +4,6 @@
 - Prefer environment variables for secrets.
 
 - Commit gate (for Copilot commits): before committing any changes, run `make check` and `make qa`.
+	- Also run `make format` before the above when changing C sources/headers.
 	- If tools are missing (e.g., `clang-format`/`clang-tidy`), `make qa` must still pass (it should warn and continue).
 	- If either fails, fix the issue or ask the user how to proceed; do not commit.

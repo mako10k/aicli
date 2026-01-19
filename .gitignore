@@ -4,6 +4,11 @@ build/
 tests/tmp/
 tmp/
 
+# editor/backup files
+*~
+\#*\#
+.\#*
+
 # autotools generated
 autom4te.cache/
 aclocal.m4
@@ -24,6 +29,7 @@ include/Makefile.in
 tests/Makefile.in
 
 src/.deps/
+**/.deps/
 src/aicli
 tests/*.log
 tests/*.trs
