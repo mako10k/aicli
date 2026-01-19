@@ -4,6 +4,7 @@ aicli_SOURCES = \
 	main.c \
 	cli.c \
 	config.c \
+	openai_responses.c \
 	brave_search.c \
 	../vendor/yyjson/yyjson.c \
 	buf.c \
