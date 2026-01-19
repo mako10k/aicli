@@ -1,3 +1,4 @@
+
 #include "cli.h"
 
 #include <errno.h>
@@ -992,60 +993,60 @@ static int cmd_run(int argc, char **argv, const aicli_config_t *cfg)
 					aicli_google_response_free(&gres);
 					free(query);
 				} else {
-					// Build a compact search summary using yyjson when available.
-					{
+						// Build a compact search summary using yyjson when available.
 #if HAVE_YYJSON_H
-						yyjson_doc *doc = yyjson_read(gres.body, gres.body_len, 0);
-					if (doc) {
-						yyjson_val *root = yyjson_doc_get_root(doc);
-						yyjson_val *items = root ? yyjson_obj_get(root, "items") : NULL;
-						yyjson_val *results = items;
-						if (results && yyjson_is_arr(results)) {
-							yyjson_mut_doc *md = yyjson_mut_doc_new(NULL);
-							yyjson_mut_val *arr = yyjson_mut_arr(md);
-							yyjson_mut_doc_set_root(md, arr);
-							// We store an array of objects {title,url,description}
-							size_t max = yyjson_arr_size(results);
-							if (max > 5)
-								max = 5;
-							for (size_t ri = 0; ri < max; ri++) {
-								yyjson_val *it = yyjson_arr_get(results, ri);
-								if (!it || !yyjson_is_obj(it))
-									continue;
-								const char *title = NULL;
-								const char *url = NULL;
-								const char *desc = NULL;
-								yyjson_val *v;
-								v = yyjson_obj_get(it, "title");
-								if (v && yyjson_is_str(v))
-									title = yyjson_get_str(v);
-								v = yyjson_obj_get(it, "link");
-								if (v && yyjson_is_str(v))
-									url = yyjson_get_str(v);
-								v = yyjson_obj_get(it, "snippet");
-								if (v && yyjson_is_str(v))
-									desc = yyjson_get_str(v);
+						{
+							yyjson_doc *doc = yyjson_read(gres.body, gres.body_len, 0);
+							if (doc) {
+								yyjson_val *root = yyjson_doc_get_root(doc);
+								yyjson_val *items = root ? yyjson_obj_get(root, "items") : NULL;
+								yyjson_val *results = items;
+								if (results && yyjson_is_arr(results)) {
+									yyjson_mut_doc *md = yyjson_mut_doc_new(NULL);
+									yyjson_mut_val *arr = yyjson_mut_arr(md);
+									yyjson_mut_doc_set_root(md, arr);
+									// We store an array of objects {title,url,description}
+									size_t max = yyjson_arr_size(results);
+									if (max > 5)
+										max = 5;
+									for (size_t ri = 0; ri < max; ri++) {
+										yyjson_val *it = yyjson_arr_get(results, ri);
+										if (!it || !yyjson_is_obj(it))
+											continue;
+										const char *title = NULL;
+										const char *url = NULL;
+										const char *desc = NULL;
+										yyjson_val *v;
+										v = yyjson_obj_get(it, "title");
+										if (v && yyjson_is_str(v))
+											title = yyjson_get_str(v);
+										v = yyjson_obj_get(it, "link");
+										if (v && yyjson_is_str(v))
+											url = yyjson_get_str(v);
+										v = yyjson_obj_get(it, "snippet");
+										if (v && yyjson_is_str(v))
+											desc = yyjson_get_str(v);
 
-								yyjson_mut_val *o = yyjson_mut_obj(md);
-								yyjson_mut_obj_add_str(md, o, "title", title ? title : "");
-								yyjson_mut_obj_add_str(md, o, "url", url ? url : "");
-								yyjson_mut_obj_add_str(md, o, "description", desc ? desc : "");
-								yyjson_mut_arr_add_val(arr, o);
-							}
+										yyjson_mut_val *o = yyjson_mut_obj(md);
+										yyjson_mut_obj_add_str(md, o, "title", title ? title : "");
+										yyjson_mut_obj_add_str(md, o, "url", url ? url : "");
+										yyjson_mut_obj_add_str(md, o, "description", desc ? desc : "");
+										yyjson_mut_arr_add_val(arr, o);
+									}
 
-							char *json = yyjson_mut_write(md, 0, NULL);
-							yyjson_mut_doc_free(md);
-							if (json) {
-								const char *hdr = "SEARCH_RESULTS:\n";
-								size_t need = strlen(hdr) + strlen(json) + 2;
-								summary = (char *)malloc(need);
-								if (summary)
-									snprintf(summary, need, "%s%s\n", hdr, json);
-								free(json);
-							}
+									char *json = yyjson_mut_write(md, 0, NULL);
+									yyjson_mut_doc_free(md);
+									if (json) {
+										const char *hdr = "SEARCH_RESULTS:\n";
+										size_t need = strlen(hdr) + strlen(json) + 2;
+										summary = (char *)malloc(need);
+										if (summary)
+											snprintf(summary, need, "%s%s\n", hdr, json);
+										free(json);
+									}
+								}
+							yyjson_doc_free(doc);
 						}
-					}
-					yyjson_doc_free(doc);
 					}
 #endif
 					if (!summary && gres.body && gres.body_len) {
@@ -1063,7 +1064,6 @@ static int cmd_run(int argc, char **argv, const aicli_config_t *cfg)
 							summary[strlen(hdr) + n + 1] = '\0';
 						}
 					}
-				}
 					aicli_google_response_free(&gres);
 					free(query);
 					if (summary) {
@@ -1527,6 +1527,17 @@ int aicli_cli_main(int argc, char **argv)
 		return 0;
 	}
 
+	if (strcmp(argv[1], "--version") == 0 || strcmp(argv[1], "-V") == 0) {
+#ifdef PACKAGE_STRING
+		printf("%s\n", PACKAGE_STRING);
+#elif defined(VERSION)
+		printf("aicli %s\n", VERSION);
+#else
+		printf("aicli\n");
+#endif
+		return 0;
+	}
+
 	if (strcmp(argv[1], "--list-tools") == 0) {
 		return cmd_list_tools();
 	}
@@ -1534,6 +1545,20 @@ int aicli_cli_main(int argc, char **argv)
 	// Allow global flags (e.g. --config/--no-config) before subcommands.
 	int argi = 1;
 	while (argi < argc && strncmp(argv[argi], "--", 2) == 0) {
+		if (strcmp(argv[argi], "--help") == 0 || strcmp(argv[argi], "-h") == 0) {
+			usage(stdout);
+			return 0;
+		}
+		if (strcmp(argv[argi], "--version") == 0 || strcmp(argv[argi], "-V") == 0) {
+#ifdef PACKAGE_STRING
+			printf("%s\n", PACKAGE_STRING);
+#elif defined(VERSION)
+			printf("aicli %s\n", VERSION);
+#else
+			printf("aicli\n");
+#endif
+			return 0;
+		}
 		if (strcmp(argv[argi], "--no-config") == 0) {
 			argi++;
 			continue;
@@ -1544,6 +1569,12 @@ int aicli_cli_main(int argc, char **argv)
 		}
 		// Stop at unknown flag; other subcommands may parse it.
 		break;
+	}
+
+	if (argi >= argc) {
+		fprintf(stderr, "missing subcommand\n");
+		usage(stderr);
+		return 2;
 	}
 
 	if (argi < argc && strcmp(argv[argi], "_exec") == 0) {
@@ -1560,7 +1591,7 @@ int aicli_cli_main(int argc, char **argv)
 
 	int rc = 0;
 
-	if (strcmp(argv[1], "web") == 0) {
+	if (strcmp(argv[argi], "web") == 0) {
 		if (argc >= 3 && strcmp(argv[2], "search") == 0) {
 			rc = cmd_web_search(argc, argv, &cfg);
 			aicli_config_free(&cfg);
@@ -1571,21 +1602,20 @@ int aicli_cli_main(int argc, char **argv)
 		return 2;
 	}
 
-	if (strcmp(argv[1], "chat") == 0) {
+	if (strcmp(argv[argi], "chat") == 0) {
 		rc = cmd_chat(argc, argv, &cfg);
 		aicli_config_free(&cfg);
 		return rc;
 	}
 
-	if (strcmp(argv[1], "run") == 0) {
+	if (strcmp(argv[argi], "run") == 0) {
 		rc = cmd_run(argc, argv, &cfg);
 		aicli_config_free(&cfg);
 		return rc;
 	}
 
-	// Stub scaffold: other subcommands will be wired in MVP implementation.
-	fprintf(stderr, "scaffold: subcommands not implemented yet (%s)\n", argv[1]);
-	fprintf(stderr, "See docs/design.md for the target spec.\n");
+	fprintf(stderr, "unknown subcommand: %s\n", argv[argi]);
+	usage(stderr);
 	aicli_config_free(&cfg);
-	return 0;
+	return 2;
 }
