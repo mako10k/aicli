@@ -13,6 +13,9 @@
 #include "buf.h"
 
 #include "allowlist_list_tool.h"
+#include "paging_cache.h"
+#include "web_search_tool.h"
+#include "web_fetch_tool.h"
 
 static const char *safe_str(const char *s) { return s ? s : ""; }
 
@@ -367,6 +370,121 @@ static char *build_execute_tool_json(void)
 	yyjson_mut_obj_add_str(doc, p_size2, "description", "Max items to return (<=200). Default 50.");
 	yyjson_mut_obj_add_val(doc, props2, "size", p_size2);
 
+	// web_search
+	yyjson_mut_val *tool3 = yyjson_mut_obj(doc);
+	yyjson_mut_arr_add_val(arr, tool3);
+	yyjson_mut_obj_add_str(doc, tool3, "type", "function");
+	yyjson_mut_obj_add_str(doc, tool3, "name", "web_search");
+	yyjson_mut_obj_add_bool(doc, tool3, "strict", false);
+	yyjson_mut_obj_add_str(doc, tool3, "description",
+	                      "Web search (read-only, network). Uses configured provider (google_cse or brave). "
+	                      "Supports paging via start/size (bytes of returned text/JSON). ");
+
+	yyjson_mut_val *params3 = yyjson_mut_obj(doc);
+	yyjson_mut_obj_add_val(doc, tool3, "parameters", params3);
+	yyjson_mut_obj_add_str(doc, params3, "type", "object");
+	yyjson_mut_obj_add_bool(doc, params3, "additionalProperties", false);
+	yyjson_mut_val *props3 = yyjson_mut_obj(doc);
+	yyjson_mut_obj_add_val(doc, params3, "properties", props3);
+
+	yyjson_mut_val *p_q3 = yyjson_mut_obj(doc);
+	yyjson_mut_obj_add_str(doc, p_q3, "type", "string");
+	yyjson_mut_obj_add_str(doc, p_q3, "description", "REQUIRED. Search query string.");
+	yyjson_mut_obj_add_val(doc, props3, "query", p_q3);
+
+	yyjson_mut_val *p_provider3 = yyjson_mut_obj(doc);
+	yyjson_mut_obj_add_str(doc, p_provider3, "type", "string");
+	yyjson_mut_obj_add_str(doc, p_provider3, "description", "Optional provider override: auto|google_cse|brave.");
+	yyjson_mut_obj_add_val(doc, props3, "provider", p_provider3);
+
+	yyjson_mut_val *p_count3 = yyjson_mut_obj(doc);
+	yyjson_mut_obj_add_str(doc, p_count3, "type", "integer");
+	yyjson_mut_obj_add_int(doc, p_count3, "minimum", 1);
+	yyjson_mut_obj_add_int(doc, p_count3, "maximum", 20);
+	yyjson_mut_obj_add_str(doc, p_count3, "description", "Optional max results (provider-capped).");
+	yyjson_mut_obj_add_val(doc, props3, "count", p_count3);
+
+	yyjson_mut_val *p_lang3 = yyjson_mut_obj(doc);
+	yyjson_mut_obj_add_str(doc, p_lang3, "type", "string");
+	yyjson_mut_obj_add_str(doc, p_lang3, "description", "Optional language hint (brave) or locale string.");
+	yyjson_mut_obj_add_val(doc, props3, "lang", p_lang3);
+
+	yyjson_mut_val *p_fresh3 = yyjson_mut_obj(doc);
+	yyjson_mut_obj_add_str(doc, p_fresh3, "type", "string");
+	yyjson_mut_obj_add_str(doc, p_fresh3, "description", "Optional freshness: day|week|month (brave).");
+	yyjson_mut_obj_add_val(doc, props3, "freshness", p_fresh3);
+
+	yyjson_mut_val *p_raw3 = yyjson_mut_obj(doc);
+	yyjson_mut_obj_add_str(doc, p_raw3, "type", "boolean");
+	yyjson_mut_obj_add_str(doc, p_raw3, "description", "Optional: return raw JSON bytes when possible.");
+	yyjson_mut_obj_add_val(doc, props3, "raw", p_raw3);
+
+	yyjson_mut_val *p_start3 = yyjson_mut_obj(doc);
+	yyjson_mut_obj_add_str(doc, p_start3, "type", "integer");
+	yyjson_mut_obj_add_int(doc, p_start3, "minimum", 0);
+	yyjson_mut_obj_add_str(doc, p_start3, "description", "Byte offset for paging.");
+	yyjson_mut_obj_add_val(doc, props3, "start", p_start3);
+
+	yyjson_mut_val *p_size3 = yyjson_mut_obj(doc);
+	yyjson_mut_obj_add_str(doc, p_size3, "type", "integer");
+	yyjson_mut_obj_add_int(doc, p_size3, "minimum", 1);
+	yyjson_mut_obj_add_int(doc, p_size3, "maximum", 4096);
+	yyjson_mut_obj_add_str(doc, p_size3, "description", "Max bytes to return (<=4096).");
+	yyjson_mut_obj_add_val(doc, props3, "size", p_size3);
+
+	yyjson_mut_val *p_idem3 = yyjson_mut_obj(doc);
+	yyjson_mut_obj_add_str(doc, p_idem3, "type", "string");
+	yyjson_mut_obj_add_str(doc, p_idem3, "description", "Optional idempotency key for caching.");
+	yyjson_mut_obj_add_val(doc, props3, "idempotency", p_idem3);
+
+	yyjson_mut_val *req3 = yyjson_mut_arr(doc);
+	yyjson_mut_arr_add_str(doc, req3, "query");
+	yyjson_mut_obj_add_val(doc, params3, "required", req3);
+
+	// web_fetch
+	yyjson_mut_val *tool4 = yyjson_mut_obj(doc);
+	yyjson_mut_arr_add_val(arr, tool4);
+	yyjson_mut_obj_add_str(doc, tool4, "type", "function");
+	yyjson_mut_obj_add_str(doc, tool4, "name", "web_fetch");
+	yyjson_mut_obj_add_bool(doc, tool4, "strict", false);
+	yyjson_mut_obj_add_str(doc, tool4, "description",
+	                      "Fetch a URL via HTTP GET with strict allowlisted URL prefixes. "
+	                      "Supports paging via start/size. ");
+
+	yyjson_mut_val *params4 = yyjson_mut_obj(doc);
+	yyjson_mut_obj_add_val(doc, tool4, "parameters", params4);
+	yyjson_mut_obj_add_str(doc, params4, "type", "object");
+	yyjson_mut_obj_add_bool(doc, params4, "additionalProperties", false);
+	yyjson_mut_val *props4 = yyjson_mut_obj(doc);
+	yyjson_mut_obj_add_val(doc, params4, "properties", props4);
+
+	yyjson_mut_val *p_url4 = yyjson_mut_obj(doc);
+	yyjson_mut_obj_add_str(doc, p_url4, "type", "string");
+	yyjson_mut_obj_add_str(doc, p_url4, "description", "REQUIRED. URL to fetch (GET only).");
+	yyjson_mut_obj_add_val(doc, props4, "url", p_url4);
+
+	yyjson_mut_val *p_start4 = yyjson_mut_obj(doc);
+	yyjson_mut_obj_add_str(doc, p_start4, "type", "integer");
+	yyjson_mut_obj_add_int(doc, p_start4, "minimum", 0);
+	yyjson_mut_obj_add_str(doc, p_start4, "description", "Byte offset for paging.");
+	yyjson_mut_obj_add_val(doc, props4, "start", p_start4);
+
+	yyjson_mut_val *p_size4 = yyjson_mut_obj(doc);
+	yyjson_mut_obj_add_str(doc, p_size4, "type", "integer");
+	yyjson_mut_obj_add_int(doc, p_size4, "minimum", 1);
+	yyjson_mut_obj_add_int(doc, p_size4, "maximum", 4096);
+	yyjson_mut_obj_add_str(doc, p_size4, "description", "Max bytes to return (<=4096).");
+	yyjson_mut_obj_add_val(doc, props4, "size", p_size4);
+
+	yyjson_mut_val *p_idem4 = yyjson_mut_obj(doc);
+	yyjson_mut_obj_add_str(doc, p_idem4, "type", "string");
+	yyjson_mut_obj_add_str(doc, p_idem4, "description", "Optional idempotency key for caching.");
+	yyjson_mut_obj_add_val(doc, props4, "idempotency", p_idem4);
+
+	yyjson_mut_val *req4 = yyjson_mut_arr(doc);
+	yyjson_mut_arr_add_str(doc, req4, "url");
+	yyjson_mut_obj_add_val(doc, params4, "required", req4);
+
 	char *json = yyjson_mut_write(doc, 0, NULL);
 	yyjson_mut_doc_free(doc);
 	return json;
@@ -385,6 +503,247 @@ typedef struct {
 	aicli_list_allowed_files_result_t res;
 	bool done;
 } list_job_t;
+
+typedef struct {
+	const aicli_config_t *cfg;
+	aicli_paging_cache_t *cache;
+	aicli_web_search_tool_request_t req;
+	aicli_tool_result_t res;
+	bool done;
+} web_search_job_t;
+
+typedef struct {
+	const aicli_config_t *cfg;
+	aicli_paging_cache_t *cache;
+	aicli_web_fetch_tool_request_t req;
+	aicli_tool_result_t res;
+	bool done;
+} web_fetch_job_t;
+
+static void free_web_search_request_owned(aicli_web_search_tool_request_t *r)
+{
+	if (!r)
+		return;
+	free((void *)r->query);
+	free((void *)r->lang);
+	free((void *)r->freshness);
+	free((void *)r->idempotency);
+	memset(r, 0, sizeof(*r));
+}
+
+static void free_web_fetch_request_owned(aicli_web_fetch_tool_request_t *r)
+{
+	if (!r)
+		return;
+	free((void *)r->url);
+	free((void *)r->idempotency);
+	// allowed_prefixes are owned elsewhere
+	memset(r, 0, sizeof(*r));
+}
+
+static int dup_web_search_request_strings(aicli_web_search_tool_request_t *r)
+{
+	if (!r)
+		return 1;
+	if (!r->query || !r->query[0])
+		return 1;
+	char *q = dup_cstr(r->query);
+	if (!q)
+		return 1;
+	char *lang = NULL;
+	char *fresh = NULL;
+	char *idem = NULL;
+	if (r->lang && r->lang[0]) {
+		lang = dup_cstr(r->lang);
+		if (!lang) {
+			free(q);
+			return 1;
+		}
+	}
+	if (r->freshness && r->freshness[0]) {
+		fresh = dup_cstr(r->freshness);
+		if (!fresh) {
+			free(q);
+			free(lang);
+			return 1;
+		}
+	}
+	if (r->idempotency && r->idempotency[0]) {
+		idem = dup_cstr(r->idempotency);
+		if (!idem) {
+			free(q);
+			free(lang);
+			free(fresh);
+			return 1;
+		}
+	}
+	r->query = q;
+	r->lang = lang;
+	r->freshness = fresh;
+	r->idempotency = idem;
+	return 0;
+}
+
+static int dup_web_fetch_request_strings(aicli_web_fetch_tool_request_t *r)
+{
+	if (!r)
+		return 1;
+	if (!r->url || !r->url[0])
+		return 1;
+	char *u = dup_cstr(r->url);
+	if (!u)
+		return 1;
+	char *idem = NULL;
+	if (r->idempotency && r->idempotency[0]) {
+		idem = dup_cstr(r->idempotency);
+		if (!idem) {
+			free(u);
+			return 1;
+		}
+	}
+	r->url = u;
+	r->idempotency = idem;
+	return 0;
+}
+
+static aicli_web_provider_t parse_provider_string(const char *s)
+{
+	if (!s || !s[0])
+		return AICLI_WEB_PROVIDER_AUTO;
+	if (strcmp(s, "auto") == 0)
+		return AICLI_WEB_PROVIDER_AUTO;
+	if (strcmp(s, "google") == 0 || strcmp(s, "google_cse") == 0)
+		return AICLI_WEB_PROVIDER_GOOGLE_CSE;
+	if (strcmp(s, "brave") == 0)
+		return AICLI_WEB_PROVIDER_BRAVE;
+	return AICLI_WEB_PROVIDER_AUTO;
+}
+
+static int parse_web_search_arguments(yyjson_val *args, aicli_web_search_tool_request_t *out)
+{
+	if (!out)
+		return 1;
+	*out = (aicli_web_search_tool_request_t){0};
+	if (!args)
+		return 1;
+
+	if (yyjson_is_str(args)) {
+		const char *s = yyjson_get_str(args);
+		if (!s || !s[0])
+			return 1;
+		yyjson_doc *doc = yyjson_read(s, strlen(s), 0);
+		if (!doc)
+			return 1;
+		yyjson_val *root = yyjson_doc_get_root(doc);
+		int rc = parse_web_search_arguments(root, out);
+		yyjson_doc_free(doc);
+		return rc;
+	}
+	if (!yyjson_is_obj(args))
+		return 1;
+
+	yyjson_val *v;
+	v = yyjson_obj_get(args, "query");
+	if (!v || !yyjson_is_str(v))
+		return 2;
+	out->query = yyjson_get_str(v);
+
+	v = yyjson_obj_get(args, "provider");
+	if (v && yyjson_is_str(v))
+		out->provider = parse_provider_string(yyjson_get_str(v));
+
+	v = yyjson_obj_get(args, "count");
+	if (v && yyjson_is_int(v))
+		out->count = (int)yyjson_get_int(v);
+
+	v = yyjson_obj_get(args, "lang");
+	if (v && yyjson_is_str(v))
+		out->lang = yyjson_get_str(v);
+
+	v = yyjson_obj_get(args, "freshness");
+	if (v && yyjson_is_str(v))
+		out->freshness = yyjson_get_str(v);
+
+	v = yyjson_obj_get(args, "raw");
+	if (v && yyjson_is_bool(v))
+		out->raw = yyjson_get_bool(v);
+
+	v = yyjson_obj_get(args, "start");
+	if (v && yyjson_is_int(v))
+		out->start = (size_t)yyjson_get_int(v);
+	v = yyjson_obj_get(args, "size");
+	if (v && yyjson_is_int(v))
+		out->size = (size_t)yyjson_get_int(v);
+
+	v = yyjson_obj_get(args, "idempotency");
+	if (v && yyjson_is_str(v))
+		out->idempotency = yyjson_get_str(v);
+
+	return 0;
+}
+
+static int parse_web_fetch_arguments(yyjson_val *args, aicli_web_fetch_tool_request_t *out)
+{
+	if (!out)
+		return 1;
+	*out = (aicli_web_fetch_tool_request_t){0};
+	if (!args)
+		return 1;
+
+	if (yyjson_is_str(args)) {
+		const char *s = yyjson_get_str(args);
+		if (!s || !s[0])
+			return 1;
+		yyjson_doc *doc = yyjson_read(s, strlen(s), 0);
+		if (!doc)
+			return 1;
+		yyjson_val *root = yyjson_doc_get_root(doc);
+		int rc = parse_web_fetch_arguments(root, out);
+		yyjson_doc_free(doc);
+		return rc;
+	}
+	if (!yyjson_is_obj(args))
+		return 1;
+
+	yyjson_val *v;
+	v = yyjson_obj_get(args, "url");
+	if (!v || !yyjson_is_str(v))
+		return 2;
+	out->url = yyjson_get_str(v);
+
+	v = yyjson_obj_get(args, "start");
+	if (v && yyjson_is_int(v))
+		out->start = (size_t)yyjson_get_int(v);
+	v = yyjson_obj_get(args, "size");
+	if (v && yyjson_is_int(v))
+		out->size = (size_t)yyjson_get_int(v);
+
+	v = yyjson_obj_get(args, "idempotency");
+	if (v && yyjson_is_str(v))
+		out->idempotency = yyjson_get_str(v);
+
+	return 0;
+}
+
+static void web_search_job_main(void *arg)
+{
+	web_search_job_t *j = (web_search_job_t *)arg;
+	if (!j)
+		return;
+	memset(&j->res, 0, sizeof(j->res));
+	(void)aicli_web_search_tool_run(j->cfg, j->cache, &j->req, &j->res);
+	j->done = true;
+}
+
+static void web_fetch_job_main(void *arg)
+{
+	web_fetch_job_t *j = (web_fetch_job_t *)arg;
+	if (!j)
+		return;
+	memset(&j->res, 0, sizeof(j->res));
+	(void)aicli_web_fetch_tool_run(j->cfg, j->cache, &j->req, &j->res);
+	j->done = true;
+}
 
 static void free_list_request_owned(aicli_list_allowed_files_request_t *r)
 {
@@ -1011,6 +1370,37 @@ int aicli_openai_run_with_tools(const aicli_config_t *cfg,
 	char *tools_json = build_execute_tool_json();
 	if (!tools_json)
 		return 2;
+
+	// Shared in-memory paging cache for tools (execute/web_search/web_fetch).
+	// Kept per-run (process memory only).
+	aicli_paging_cache_t *tool_cache = aicli_paging_cache_create(64);
+
+	// URL allowlist for web_fetch (prefix-based). Default: disabled unless explicitly set.
+	// Prefer env var for secrets/config.
+	const char *web_fetch_prefixes_env = getenv("AICLI_WEB_FETCH_PREFIXES");
+	const char *web_fetch_prefixes[32];
+	size_t web_fetch_prefix_count = 0;
+	char *web_fetch_prefixes_buf = NULL;
+	if (web_fetch_prefixes_env && web_fetch_prefixes_env[0]) {
+		web_fetch_prefixes_buf = dup_cstr(web_fetch_prefixes_env);
+		if (web_fetch_prefixes_buf) {
+			char *p = web_fetch_prefixes_buf;
+			while (p && *p) {
+				while (*p == ' ' || *p == '\t' || *p == ',')
+					p++;
+				if (!*p)
+					break;
+				if (web_fetch_prefix_count >= (sizeof(web_fetch_prefixes) / sizeof(web_fetch_prefixes[0])))
+					break;
+				web_fetch_prefixes[web_fetch_prefix_count++] = p;
+				char *comma = strchr(p, ',');
+				if (!comma)
+					break;
+				*comma = '\0';
+				p = comma + 1;
+			}
+		}
+	}
 	if (cfg && cfg->debug_api >= 3) {
 		size_t maxb = debug_max_bytes_for_level(cfg->debug_api);
 		debug_print_trunc(stderr, "[debug:api] tools_json", tools_json, maxb);
@@ -1090,11 +1480,15 @@ int aicli_openai_run_with_tools(const aicli_config_t *cfg,
 
 		exec_job_t *jobs = (exec_job_t *)calloc(max_tool_calls_per_turn, sizeof(exec_job_t));
 		list_job_t *ljobs = (list_job_t *)calloc(max_tool_calls_per_turn, sizeof(list_job_t));
+		web_search_job_t *sjobs = (web_search_job_t *)calloc(max_tool_calls_per_turn, sizeof(web_search_job_t));
+		web_fetch_job_t *fjobs = (web_fetch_job_t *)calloc(max_tool_calls_per_turn, sizeof(web_fetch_job_t));
 		char **call_ids = (char **)calloc(max_tool_calls_per_turn, sizeof(char *));
 		char **items_json = (char **)calloc(max_tool_calls_per_turn, sizeof(char *));
-		if (!jobs || !ljobs || !call_ids || !items_json) {
+		if (!jobs || !ljobs || !sjobs || !fjobs || !call_ids || !items_json) {
 			free(jobs);
 			free(ljobs);
+			free(sjobs);
+			free(fjobs);
 			free(call_ids);
 			free(items_json);
 			yyjson_doc_free(doc);
@@ -1105,11 +1499,13 @@ int aicli_openai_run_with_tools(const aicli_config_t *cfg,
 		(void)collect_execute_calls(root, jobs, (const char **)call_ids, max_tool_calls_per_turn, &exec_count);
 
 		size_t list_count = 0;
+		size_t web_search_count = 0;
+		size_t web_fetch_count = 0;
 		{
 			yyjson_val *outarr = find_output_array(root);
 			if (outarr) {
 				size_t idx, max = yyjson_arr_size(outarr);
-				for (idx = 0; idx < max && (exec_count + list_count) < max_tool_calls_per_turn; idx++) {
+				for (idx = 0; idx < max && (exec_count + list_count + web_search_count + web_fetch_count) < max_tool_calls_per_turn; idx++) {
 					yyjson_val *item = yyjson_arr_get(outarr, idx);
 					if (!item || !yyjson_is_obj(item))
 						continue;
@@ -1119,13 +1515,13 @@ int aicli_openai_run_with_tools(const aicli_config_t *cfg,
 						continue;
 					yyjson_val *name = yyjson_obj_get(item, "name");
 					const char *nstr = (name && yyjson_is_str(name)) ? yyjson_get_str(name) : NULL;
-					if (!nstr || strcmp(nstr, "list_allowed_files") != 0)
-						continue;
 					yyjson_val *call_id = yyjson_obj_get(item, "call_id");
 					const char *cid = (call_id && yyjson_is_str(call_id)) ? yyjson_get_str(call_id) : NULL;
 					if (!cid || !cid[0])
 						continue;
 					yyjson_val *args = yyjson_obj_get(item, "arguments");
+
+					if (nstr && strcmp(nstr, "list_allowed_files") == 0) {
 
 					ljobs[list_count].allow = allow;
 					ljobs[list_count].done = false;
@@ -1133,13 +1529,53 @@ int aicli_openai_run_with_tools(const aicli_config_t *cfg,
 					(void)parse_list_allowed_files_arguments(args, &ljobs[list_count].req);
 					(void)dup_list_request_strings(&ljobs[list_count].req);
 
-					call_ids[exec_count + list_count] = dup_cstr(cid);
+						call_ids[exec_count + list_count] = dup_cstr(cid);
 					list_count++;
+						continue;
+					}
+
+					if (nstr && strcmp(nstr, "web_search") == 0) {
+						sjobs[web_search_count].cfg = cfg;
+						sjobs[web_search_count].cache = tool_cache;
+						sjobs[web_search_count].done = false;
+						sjobs[web_search_count].req = (aicli_web_search_tool_request_t){0};
+						if (parse_web_search_arguments(args, &sjobs[web_search_count].req) == 0 &&
+						    dup_web_search_request_strings(&sjobs[web_search_count].req) == 0) {
+							call_ids[exec_count + list_count + web_search_count] = dup_cstr(cid);
+							web_search_count++;
+						} else {
+							free_web_search_request_owned(&sjobs[web_search_count].req);
+						}
+						continue;
+					}
+
+					if (nstr && strcmp(nstr, "web_fetch") == 0) {
+						fjobs[web_fetch_count].cfg = cfg;
+						fjobs[web_fetch_count].cache = tool_cache;
+						fjobs[web_fetch_count].done = false;
+						fjobs[web_fetch_count].req = (aicli_web_fetch_tool_request_t){0};
+						if (parse_web_fetch_arguments(args, &fjobs[web_fetch_count].req) == 0 &&
+						    dup_web_fetch_request_strings(&fjobs[web_fetch_count].req) == 0) {
+							// apply prefix allowlist from env
+							fjobs[web_fetch_count].req.allowed_prefixes = web_fetch_prefixes;
+							fjobs[web_fetch_count].req.allowed_prefix_count = web_fetch_prefix_count;
+							fjobs[web_fetch_count].req.max_body_bytes = 1024 * 1024;
+							fjobs[web_fetch_count].req.timeout_seconds = 15L;
+							fjobs[web_fetch_count].req.connect_timeout_seconds = 10L;
+							fjobs[web_fetch_count].req.max_redirects = 0;
+
+							call_ids[exec_count + list_count + web_search_count + web_fetch_count] = dup_cstr(cid);
+							web_fetch_count++;
+						} else {
+							free_web_fetch_request_owned(&fjobs[web_fetch_count].req);
+						}
+						continue;
+					}
 				}
 			}
 		}
 
-		size_t call_count = exec_count + list_count;
+		size_t call_count = exec_count + list_count + web_search_count + web_fetch_count;
 		if (call_count == 0) {
 			const char *bad_call_id = find_first_execute_call_id(root);
 			if (bad_call_id && bad_call_id[0]) {
@@ -1149,6 +1585,8 @@ int aicli_openai_run_with_tools(const aicli_config_t *cfg,
 			}
 			free(jobs);
 			free(ljobs);
+			free(sjobs);
+			free(fjobs);
 			for (size_t k = 0; k < max_tool_calls_per_turn; k++)
 				free(call_ids[k]);
 			free(call_ids);
@@ -1156,6 +1594,8 @@ int aicli_openai_run_with_tools(const aicli_config_t *cfg,
 			yyjson_doc_free(doc);
 			aicli_openai_http_response_free(&http);
 			free(tools_json);
+			free(web_fetch_prefixes_buf);
+			aicli_paging_cache_destroy(tool_cache);
 			return 2;
 		}
 
@@ -1174,6 +1614,12 @@ int aicli_openai_run_with_tools(const aicli_config_t *cfg,
 		}
 		for (size_t i = 0; i < list_count; i++) {
 			(void)aicli_threadpool_submit(tp, list_job_main, &ljobs[i]);
+		}
+		for (size_t i = 0; i < web_search_count; i++) {
+			(void)aicli_threadpool_submit(tp, web_search_job_main, &sjobs[i]);
+		}
+		for (size_t i = 0; i < web_fetch_count; i++) {
+			(void)aicli_threadpool_submit(tp, web_fetch_job_main, &fjobs[i]);
 		}
 		aicli_threadpool_drain(tp);
 		aicli_threadpool_destroy(tp);
@@ -1198,27 +1644,45 @@ int aicli_openai_run_with_tools(const aicli_config_t *cfg,
 			items_json[exec_count + i] = build_function_call_output_item_json_raw(call_ids[exec_count + i],
 			                                                                   ljobs[i].res.json);
 		}
+		for (size_t i = 0; i < web_search_count; i++) {
+			items_json[exec_count + list_count + i] =
+			    build_function_call_output_item_json(call_ids[exec_count + list_count + i], &sjobs[i].res);
+		}
+		for (size_t i = 0; i < web_fetch_count; i++) {
+			items_json[exec_count + list_count + web_search_count + i] =
+			    build_function_call_output_item_json(call_ids[exec_count + list_count + web_search_count + i],
+			                                        &fjobs[i].res);
+		}
 		for (size_t i = 0; i < call_count; i++) {
 			if (!items_json[i] || !items_json[i][0]) {
 				fprintf(stderr,
 				        "openai tool call failed: could not serialize tool output (call_id=%s)\n",
 				        safe_str(call_ids[i]));
 				for (size_t k = 0; k < call_count; k++) {
-					if (jobs[k].res.stdout_text)
-						free((void *)jobs[k].res.stdout_text);
-					free_execute_request_owned(&jobs[k].req);
-					aicli_list_allowed_files_result_free(&ljobs[k].res);
-					free_list_request_owned(&ljobs[k].req);
+					if (k < exec_count) {
+						if (jobs[k].res.stdout_text)
+							free((void *)jobs[k].res.stdout_text);
+						free_execute_request_owned(&jobs[k].req);
+					}
+					if (k >= exec_count && k < (exec_count + list_count)) {
+						size_t li = k - exec_count;
+						aicli_list_allowed_files_result_free(&ljobs[li].res);
+						free_list_request_owned(&ljobs[li].req);
+					}
 					free(items_json[k]);
 					free(call_ids[k]);
 				}
 				free(items_json);
 				free(jobs);
 				free(ljobs);
+				free(sjobs);
+				free(fjobs);
 				free(call_ids);
 				yyjson_doc_free(doc);
 				aicli_openai_http_response_free(&http);
 				free(tools_json);
+				free(web_fetch_prefixes_buf);
+				aicli_paging_cache_destroy(tool_cache);
 				return 2;
 			}
 		}
@@ -1237,16 +1701,35 @@ int aicli_openai_run_with_tools(const aicli_config_t *cfg,
 
 		char *next_payload = build_next_request_json(model, resp_id, tools_json,
 		                                           (const char **)items_json, call_count);
-		for (size_t i = 0; i < call_count; i++) {
+		for (size_t i = 0; i < exec_count; i++) {
 			if (jobs[i].res.stdout_text)
 				free((void *)jobs[i].res.stdout_text);
 			free_execute_request_owned(&jobs[i].req);
+		}
+		for (size_t i = 0; i < list_count; i++) {
+			aicli_list_allowed_files_result_free(&ljobs[i].res);
+			free_list_request_owned(&ljobs[i].req);
+		}
+		for (size_t i = 0; i < web_search_count; i++) {
+			if (sjobs[i].res.stdout_text)
+				free((void *)sjobs[i].res.stdout_text);
+			free_web_search_request_owned(&sjobs[i].req);
+		}
+		for (size_t i = 0; i < web_fetch_count; i++) {
+			if (fjobs[i].res.stdout_text)
+				free((void *)fjobs[i].res.stdout_text);
+			free_web_fetch_request_owned(&fjobs[i].req);
+		}
+		for (size_t i = 0; i < call_count; i++) {
 			free(items_json[i]);
 			free(call_ids[i]);
 		}
 		free(items_json);
 		free(jobs);
 		free(call_ids);
+		free(ljobs);
+		free(sjobs);
+		free(fjobs);
 		yyjson_doc_free(doc);
 
 		if (!next_payload)
@@ -1297,5 +1780,7 @@ int aicli_openai_run_with_tools(const aicli_config_t *cfg,
 	}
 	aicli_openai_http_response_free(&http);
 	free(tools_json);
+	free(web_fetch_prefixes_buf);
+	aicli_paging_cache_destroy(tool_cache);
 	return 2;
 }

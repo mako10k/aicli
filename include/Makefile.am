@@ -13,5 +13,9 @@ nobase_include_HEADERS = \
 	path_util.h \
 	google_search.h \
 	allowlist_list_tool.h \
+	paging_cache.h \
+	web_tools.h \
+	web_search_tool.h \
+	web_fetch_tool.h \
 	execute_dsl.h \
 	execute_tool.h

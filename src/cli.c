@@ -17,6 +17,9 @@
 #include "google_search.h"
 #include "execute_tool.h"
 #include "openai_tool_loop.h"
+#include "paging_cache.h"
+#include "web_search_tool.h"
+#include "web_fetch_tool.h"
 
 #if HAVE_YYJSON_H
 #include <yyjson.h>
@@ -482,6 +485,8 @@ static void usage(FILE *out)
 	        "  aicli _exec [--file PATH ...] [--file - | --stdin] [--start N] [--size N] <cmd>\n"
 	        "  aicli chat <prompt>\n"
 	        "  aicli web search <query> [--count N] [--lang xx] [--freshness day|week|month] [--max-title N] [--max-url N] [--max-snippet N] [--width N] [--raw]\n"
+	        "                    (note: --start/--size are available only with --raw)\n"
+	        "  aicli web fetch <url> [--start N] [--size N]\n"
 	        "  aicli run [--file PATH ...] [--file - | --stdin] [--turns N] [--max-tool-calls N] [--tool-threads N]\n"
 	        "           [--disable-all-tools] [--available-tools TOOL[,TOOL...]] [--force-tool TOOL]\n"
 	        "           [--config PATH] [--no-config]\n"
@@ -497,6 +502,7 @@ static void usage(FILE *out)
 	        "\n"
 	        "Environment:\n"
 	        "  AICLI_SEARCH_PROVIDER=google_cse|google|brave (default: google_cse)\n"
+	        "  AICLI_WEB_FETCH_PREFIXES=prefix1,prefix2,... (enables web fetch allowlist)\n"
 	        "  GOOGLE_API_KEY=...\n"
 	        "  GOOGLE_CSE_CX=...\n"
 	        "  BRAVE_API_KEY=... (when provider=brave)\n");
@@ -1254,6 +1260,8 @@ static int cmd_web_search(int argc, char **argv, const aicli_config_t *cfg)
 	int count = 5;
 	const char *lang = NULL;
 	const char *freshness = NULL;
+	size_t start = 0;
+	size_t size = 4096;
 	int raw_json = 0;
 	size_t max_title = 160;
 	size_t max_url = 500;
@@ -1273,6 +1281,28 @@ static int cmd_web_search(int argc, char **argv, const aicli_config_t *cfg)
 		}
 		if (strcmp(argv[i], "--freshness") == 0 && i + 1 < argc) {
 			freshness = argv[i + 1];
+			i++;
+			continue;
+		}
+		if (strcmp(argv[i], "--start") == 0 && i + 1 < argc) {
+			errno = 0;
+			unsigned long long v = strtoull(argv[i + 1], NULL, 10);
+			if (errno != 0) {
+				fprintf(stderr, "invalid --start\n");
+				return 2;
+			}
+			start = (size_t)v;
+			i++;
+			continue;
+		}
+		if (strcmp(argv[i], "--size") == 0 && i + 1 < argc) {
+			errno = 0;
+			unsigned long long v = strtoull(argv[i + 1], NULL, 10);
+			if (errno != 0) {
+				fprintf(stderr, "invalid --size\n");
+				return 2;
+			}
+			size = (size_t)v;
 			i++;
 			continue;
 		}
@@ -1344,175 +1374,331 @@ static int cmd_web_search(int argc, char **argv, const aicli_config_t *cfg)
 		return 2;
 	}
 
-	// Language precedence: --lang > system locale > unset
-	const char *effective_lang = lang;
-	if (!effective_lang || !effective_lang[0])
-		effective_lang = first_nonempty_env("LC_ALL", "LC_MESSAGES", "LANG");
+	// A方針: コマンドライン直叩きは pretty がデフォルト。
+	// --raw の時だけ tool 経由（ページング/キャッシュ）を有効にする。
+	if (!raw_json) {
+		// Language precedence: --lang > system locale > unset
+		const char *effective_lang = lang;
+		if (!effective_lang || !effective_lang[0])
+			effective_lang = first_nonempty_env("LC_ALL", "LC_MESSAGES", "LANG");
 
-	if (width == 0)
-		width = detect_tty_width_or_default(80);
+		if (width == 0)
+			width = detect_tty_width_or_default(80);
 
-	// Provider-aware search
-	int is_google = (cfg->search_provider == AICLI_SEARCH_PROVIDER_GOOGLE_CSE);
-	int is_brave = (cfg->search_provider == AICLI_SEARCH_PROVIDER_BRAVE);
+		// Provider-aware search
+		int is_google = (cfg->search_provider == AICLI_SEARCH_PROVIDER_GOOGLE_CSE);
+		int is_brave = (cfg->search_provider == AICLI_SEARCH_PROVIDER_BRAVE);
 
-	if (is_google) {
-		char lr_buf[32];
-		const char *lr = NULL;
-		if (effective_lang && effective_lang[0]) {
-			if (locale_to_google_lr(effective_lang, lr_buf) == 0)
-				lr = lr_buf;
-		}
+		if (is_google) {
+			char lr_buf[32];
+			const char *lr = NULL;
+			if (effective_lang && effective_lang[0]) {
+				if (locale_to_google_lr(effective_lang, lr_buf) == 0)
+					lr = lr_buf;
+			}
 
-		aicli_google_response_t res;
-		int rc = aicli_google_cse_search(cfg->google_api_key, cfg->google_cse_cx,
-		                               query, count,
-		                               lr, &res);
-		if (rc != 0) {
-			fprintf(stderr, "google cse search failed: %s\n", res.error[0] ? res.error : "unknown");
-			aicli_google_response_free(&res);
-			return 2;
-		}
+			aicli_google_response_t gres;
+			int rc = aicli_google_cse_search(cfg->google_api_key, cfg->google_cse_cx,
+			                               query, count,
+			                               lr, &gres);
+			if (rc != 0) {
+				fprintf(stderr, "google cse search failed: %s\n",
+				        gres.error[0] ? gres.error : "unknown");
+				aicli_google_response_free(&gres);
+				return 2;
+			}
 
-		if (res.http_status != 200) {
-			fprintf(stderr, "google http_status=%d\n", res.http_status);
-			if (res.body && res.body_len)
-				fwrite(res.body, 1, res.body_len, stdout);
-			fputc('\n', stdout);
-			aicli_google_response_free(&res);
-			return 1;
-		}
+			if (gres.http_status != 200) {
+				fprintf(stderr, "google http_status=%d\n", gres.http_status);
+				if (gres.body && gres.body_len)
+					fwrite(gres.body, 1, gres.body_len, stdout);
+				fputc('\n', stdout);
+				aicli_google_response_free(&gres);
+				return 1;
+			}
 
-		if (raw_json) {
-			if (res.body && res.body_len)
-				fwrite(res.body, 1, res.body_len, stdout);
-			fputc('\n', stdout);
-			aicli_google_response_free(&res);
+			if (google_cse_print_formatted_from_json(gres.body, gres.body_len, query,
+							        count, max_title, max_url, max_snippet, width) == 0) {
+				aicli_google_response_free(&gres);
+				return 0;
+			}
+
+			// Fallback: print the first ~4KB.
+			size_t n = gres.body_len;
+			if (n > 4096)
+				n = 4096;
+			fwrite(gres.body, 1, n, stdout);
+			fprintf(stdout,
+			        "\n... (truncated, %zu bytes total; add --raw for full JSON)\n",
+			        gres.body_len);
+			aicli_google_response_free(&gres);
 			return 0;
 		}
 
-		// Default: print a formatted view (best-effort, no JSON library needed).
-		if (google_cse_print_formatted_from_json(res.body, res.body_len, query, count,
-						max_title, max_url, max_snippet, width) == 0) {
-			aicli_google_response_free(&res);
-			return 0;
-		}
+		if (is_brave) {
+			if (!cfg->brave_api_key || !cfg->brave_api_key[0]) {
+				fprintf(stderr, "BRAVE_API_KEY is required (provider=brave)\n");
+				return 2;
+			}
+			aicli_brave_response_t bres;
+			int rc = aicli_brave_web_search(cfg->brave_api_key, query, count, lang,
+				                  freshness, &bres);
+			if (rc != 0) {
+				fprintf(stderr, "brave search failed: %s\n",
+				        bres.error[0] ? bres.error : "unknown");
+				aicli_brave_response_free(&bres);
+				return 2;
+			}
 
-		// Fallback: print the first ~4KB.
-		size_t n = res.body_len;
-		if (n > 4096)
-			n = 4096;
-		fwrite(res.body, 1, n, stdout);
-		fprintf(stdout, "\n... (truncated, %zu bytes total; add --raw for full JSON)\n",
-		        res.body_len);
-		aicli_google_response_free(&res);
-		return 0;
-	}
+			if (bres.http_status != 200) {
+				fprintf(stderr, "brave http_status=%d\n", bres.http_status);
+				if (bres.body && bres.body_len)
+					fwrite(bres.body, 1, bres.body_len, stdout);
+				fputc('\n', stdout);
+				aicli_brave_response_free(&bres);
+				return 1;
+			}
 
-	if (is_brave) {
-		if (!cfg->brave_api_key || !cfg->brave_api_key[0]) {
-			fprintf(stderr, "BRAVE_API_KEY is required (provider=brave)\n");
-			return 2;
-		}
-		aicli_brave_response_t res;
-		int rc = aicli_brave_web_search(cfg->brave_api_key, query, count, lang,
-					 freshness, &res);
-		if (rc != 0) {
-			fprintf(stderr, "brave search failed: %s\n", res.error[0] ? res.error : "unknown");
-			aicli_brave_response_free(&res);
-			return 2;
-		}
-
-		if (res.http_status != 200) {
-			fprintf(stderr, "brave http_status=%d\n", res.http_status);
-			if (res.body && res.body_len)
-				fwrite(res.body, 1, res.body_len, stdout);
-			fputc('\n', stdout);
-			aicli_brave_response_free(&res);
-			return 1;
-		}
-
-	// Heuristic: small JSON is OK to print as-is; otherwise print a compact view.
-	if (raw_json || res.body_len <= 4096) {
-		if (res.body && res.body_len)
-			fwrite(res.body, 1, res.body_len, stdout);
-		fputc('\n', stdout);
-		aicli_brave_response_free(&res);
-		return 0;
-	}
+			// If yyjson is available, extract and print a compact view.
+			// Otherwise, print the first ~4KB (best-effort).
+			if (bres.body_len <= 4096) {
+				if (bres.body && bres.body_len)
+					fwrite(bres.body, 1, bres.body_len, stdout);
+				fputc('\n', stdout);
+				aicli_brave_response_free(&bres);
+				return 0;
+			}
 
 #if HAVE_YYJSON_H
-	// If yyjson is available, extract and print a compact view.
-	yyjson_doc *doc = yyjson_read(res.body, res.body_len, 0);
-	if (!doc) {
-		fprintf(stderr, "yyjson parse error\n");
-		// Fall back to truncation below.
-	} else {
-		yyjson_val *root = yyjson_doc_get_root(doc);
-		yyjson_val *web = yyjson_obj_get(root, "web");
-		yyjson_val *results = web ? yyjson_obj_get(web, "results") : NULL;
-		if (!results || !yyjson_is_arr(results)) {
-			fprintf(stderr, "unexpected JSON shape: missing web.results[]\n");
-		} else {
-			printf("# Brave Web Search\n");
-			printf("query: %s\n\n", query);
+			yyjson_doc *doc = yyjson_read(bres.body, bres.body_len, 0);
+			if (!doc) {
+				fprintf(stderr, "yyjson parse error\n");
+				// Fall back to truncation below.
+			} else {
+				yyjson_val *root = yyjson_doc_get_root(doc);
+				yyjson_val *web = yyjson_obj_get(root, "web");
+				yyjson_val *results = web ? yyjson_obj_get(web, "results") : NULL;
+				if (!results || !yyjson_is_arr(results)) {
+					fprintf(stderr,
+					        "unexpected JSON shape: missing web.results[]\n");
+				} else {
+					printf("# Brave Web Search\n");
+					printf("query: %s\n\n", query);
 
-			size_t idx, max;
-			yyjson_val *it;
-			max = yyjson_arr_size(results);
-			if (max > (size_t)count)
-				max = (size_t)count;
-			for (idx = 0; idx < max; idx++) {
-				it = yyjson_arr_get(results, idx);
-				const char *title = NULL;
-				const char *url = NULL;
-				const char *desc = NULL;
-				yyjson_val *v;
-				v = yyjson_obj_get(it, "title");
-				if (v && yyjson_is_str(v))
-					title = yyjson_get_str(v);
-				v = yyjson_obj_get(it, "url");
-				if (v && yyjson_is_str(v))
-					url = yyjson_get_str(v);
-				v = yyjson_obj_get(it, "description");
-				if (v && yyjson_is_str(v))
-					desc = yyjson_get_str(v);
+					size_t idx, max;
+					yyjson_val *it;
+					max = yyjson_arr_size(results);
+					if (max > (size_t)count)
+						max = (size_t)count;
+					for (idx = 0; idx < max; idx++) {
+						it = yyjson_arr_get(results, idx);
+						const char *title = NULL;
+						const char *url2 = NULL;
+						const char *desc = NULL;
+						yyjson_val *v;
+						v = yyjson_obj_get(it, "title");
+						if (v && yyjson_is_str(v))
+							title = yyjson_get_str(v);
+						v = yyjson_obj_get(it, "url");
+						if (v && yyjson_is_str(v))
+							url2 = yyjson_get_str(v);
+						v = yyjson_obj_get(it, "description");
+						if (v && yyjson_is_str(v))
+							desc = yyjson_get_str(v);
 
-				if (!title)
-					title = "";
-				if (!url)
-					url = "";
-				if (!desc)
-					desc = "";
+						if (!title)
+							title = "";
+						if (!url2)
+							url2 = "";
+						if (!desc)
+							desc = "";
 
-				printf("%zu) ", idx + 1);
-				fprint_wrapped(stdout, "", title, max_title, width);
-				fprint_wrapped(stdout, "    ", url, max_url, width);
-				fprint_wrapped(stdout, "    ", desc, max_snippet, width);
-				fputc('\n', stdout);
+						printf("%zu) ", idx + 1);
+						fprint_wrapped(stdout, "", title, max_title, width);
+						fprint_wrapped(stdout, "    ", url2, max_url, width);
+						fprint_wrapped(stdout, "    ", desc, max_snippet, width);
+						fputc('\n', stdout);
+					}
+					yyjson_doc_free(doc);
+					aicli_brave_response_free(&bres);
+					return 0;
+				}
+				yyjson_doc_free(doc);
 			}
-			yyjson_doc_free(doc);
-			aicli_brave_response_free(&res);
-			return 0;
-		}
-		yyjson_doc_free(doc);
-	}
 #endif
 
-	// Fallback without a JSON parser: print the first ~4KB.
-	size_t n = res.body_len;
-	if (n > 4096)
-		n = 4096;
-	fwrite(res.body, 1, n, stdout);
-	fprintf(stdout, "\n... (truncated, %zu bytes total; add --raw for full JSON)\n",
-	        res.body_len);
+			size_t n = bres.body_len;
+			if (n > 4096)
+				n = 4096;
+			fwrite(bres.body, 1, n, stdout);
+			fprintf(stdout,
+			        "\n... (truncated, %zu bytes total; add --raw for full JSON)\n",
+			        bres.body_len);
 
-	aicli_brave_response_free(&res);
-	return 0;
+			aicli_brave_response_free(&bres);
+			return 0;
+		}
+
+		fprintf(stderr, "unknown search provider\n");
+		return 2;
 	}
 
-	fprintf(stderr, "unknown search provider\n");
-	return 2;
+	// --raw: tool 経由でページング/キャッシュ
+	aicli_paging_cache_t *cache = aicli_paging_cache_create(64);
+	if (!cache) {
+		fprintf(stderr, "out of memory\n");
+		return 2;
+	}
+
+	aicli_web_search_tool_request_t req = {0};
+	req.query = query;
+	req.count = count;
+	req.lang = lang;
+	req.freshness = freshness;
+	req.raw = raw_json ? true : false;
+	req.start = start;
+	req.size = size;
+
+	aicli_tool_result_t res = {0};
+	int rc = aicli_web_search_tool_run(cfg, cache, &req, &res);
+	if (rc != 0) {
+		fprintf(stderr, "web search failed\n");
+		aicli_paging_cache_destroy(cache);
+		return rc;
+	}
+
+	if (res.stdout_text && res.stdout_text[0]) {
+		fputs(res.stdout_text, stdout);
+		fputc('\n', stdout);
+	}
+
+	if (res.truncated)
+		fprintf(stderr, "(truncated; next_start=%zu)\n", res.next_start);
+
+	if (res.stdout_text)
+		free((void *)res.stdout_text);
+	aicli_paging_cache_destroy(cache);
+	return 0;
+}
+
+static int cmd_web_fetch(int argc, char **argv, const aicli_config_t *cfg)
+{
+	if (argc < 4) {
+		fprintf(stderr, "missing url\n");
+		return 2;
+	}
+	if (!cfg) {
+		fprintf(stderr, "config is missing\n");
+		return 2;
+	}
+
+	const char *url = argv[3];
+	size_t start = 0;
+	size_t size = 4096;
+
+	for (int i = 4; i < argc; i++) {
+		if (strcmp(argv[i], "--start") == 0 && i + 1 < argc) {
+			errno = 0;
+			unsigned long long v = strtoull(argv[i + 1], NULL, 10);
+			if (errno != 0) {
+				fprintf(stderr, "invalid --start\n");
+				return 2;
+			}
+			start = (size_t)v;
+			i++;
+			continue;
+		}
+		if (strcmp(argv[i], "--size") == 0 && i + 1 < argc) {
+			errno = 0;
+			unsigned long long v = strtoull(argv[i + 1], NULL, 10);
+			if (errno != 0) {
+				fprintf(stderr, "invalid --size\n");
+				return 2;
+			}
+			size = (size_t)v;
+			i++;
+			continue;
+		}
+		fprintf(stderr, "unknown option: %s\n", argv[i]);
+		return 2;
+	}
+
+	// URL allowlist prefixes come from env var. Without it, web fetch is disabled.
+	const char *prefixes_env = getenv("AICLI_WEB_FETCH_PREFIXES");
+	const char *prefixes[32];
+	size_t prefix_count = 0;
+	char *prefixes_buf = NULL;
+	if (prefixes_env && prefixes_env[0]) {
+		prefixes_buf = strdup(prefixes_env);
+		if (!prefixes_buf) {
+			fprintf(stderr, "out of memory\n");
+			return 2;
+		}
+		char *p = prefixes_buf;
+		while (p && *p) {
+			while (*p == ' ' || *p == '\t' || *p == ',')
+				p++;
+			if (!*p)
+				break;
+			if (prefix_count >= (sizeof(prefixes) / sizeof(prefixes[0])))
+				break;
+			prefixes[prefix_count++] = p;
+			char *comma = strchr(p, ',');
+			if (!comma)
+				break;
+			*comma = '\0';
+			p = comma + 1;
+		}
+	}
+
+	aicli_paging_cache_t *cache = aicli_paging_cache_create(64);
+	if (!cache) {
+		fprintf(stderr, "out of memory\n");
+		free(prefixes_buf);
+		return 2;
+	}
+
+	aicli_web_fetch_tool_request_t req = {0};
+	req.url = url;
+	req.start = start;
+	req.size = size;
+	req.allowed_prefixes = prefixes;
+	req.allowed_prefix_count = prefix_count;
+	req.max_body_bytes = 1024 * 1024;
+	req.timeout_seconds = 15L;
+	req.connect_timeout_seconds = 10L;
+	req.max_redirects = 0;
+
+	aicli_tool_result_t res = {0};
+	int rc = aicli_web_fetch_tool_run(cfg, cache, &req, &res);
+	if (rc != 0) {
+		fprintf(stderr, "web fetch failed\n");
+		aicli_paging_cache_destroy(cache);
+		free(prefixes_buf);
+		return rc;
+	}
+	if (res.exit_code == 3 && (!prefixes_env || !prefixes_env[0])) {
+		fprintf(stderr,
+		        "web fetch is disabled by default. Set AICLI_WEB_FETCH_PREFIXES, e.g.:\n"
+		        "  AICLI_WEB_FETCH_PREFIXES='https://example.com/,https://docs.example.com/'\n");
+	}
+	if (res.exit_code != 0 && res.stderr_text && res.stderr_text[0]) {
+		fprintf(stderr, "%s\n", res.stderr_text);
+	}
+
+	if (res.stdout_text && res.stdout_text[0]) {
+		fputs(res.stdout_text, stdout);
+		fputc('\n', stdout);
+	}
+
+	if (res.truncated)
+		fprintf(stderr, "(truncated; next_start=%zu)\n", res.next_start);
+
+	if (res.stdout_text)
+		free((void *)res.stdout_text);
+	aicli_paging_cache_destroy(cache);
+	free(prefixes_buf);
+	return 0;
 }
 
 int aicli_cli_main(int argc, char **argv)
@@ -1594,6 +1780,11 @@ int aicli_cli_main(int argc, char **argv)
 	if (strcmp(argv[argi], "web") == 0) {
 		if (argc >= 3 && strcmp(argv[2], "search") == 0) {
 			rc = cmd_web_search(argc, argv, &cfg);
+			aicli_config_free(&cfg);
+			return rc;
+		}
+		if (argc >= 3 && strcmp(argv[2], "fetch") == 0) {
+			rc = cmd_web_fetch(argc, argv, &cfg);
 			aicli_config_free(&cfg);
 			return rc;
 		}

@@ -23,7 +23,10 @@ aicli_SOURCES = \
 	execute_tool_impl.c \
 	path_util.c \
 	config_file.c \
-	paging_cache.c
+	paging_cache.c \
+	web_tools.c \
+	web_search_tool.c \
+	web_fetch_tool.c
 
 aicli_CPPFLAGS = -I$(top_srcdir)/include -I$(top_srcdir)/vendor/yyjson $(CURL_CFLAGS)
 
