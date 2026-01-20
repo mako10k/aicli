@@ -23,6 +23,7 @@ aicli_SOURCES = \
 	execute_tool_impl.c \
 	path_util.c \
 	config_file.c \
+	continue_state.c \
 	paging_cache.c \
 	web_tools.c \
 	web_search_tool.c \

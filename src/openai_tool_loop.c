@@ -1046,6 +1046,30 @@ static const char *extract_response_id(yyjson_val *root)
 	return yyjson_get_str(id);
 }
 
+int aicli_openai_extract_response_id(const char *json, size_t json_len,
+				      char *out_id, size_t out_cap)
+{
+	if (!out_id || out_cap == 0)
+		return 2;
+	out_id[0] = '\0';
+	if (!json || json_len == 0)
+		return 2;
+
+	yyjson_doc *doc = yyjson_read(json, json_len, 0);
+	if (!doc)
+		return 2;
+	yyjson_val *root = yyjson_doc_get_root(doc);
+	const char *rid = extract_response_id(root);
+	if (!rid || !rid[0]) {
+		yyjson_doc_free(doc);
+		return 1;
+	}
+	strncpy(out_id, rid, out_cap - 1);
+	out_id[out_cap - 1] = '\0';
+	yyjson_doc_free(doc);
+	return 0;
+}
+
 static char *extract_first_output_text(yyjson_val *root)
 {
 	yyjson_val *out = find_output_array(root);
@@ -1347,17 +1371,78 @@ static char *build_next_request_json(const char *model,
 	return json;
 }
 
+static char *build_initial_request_json(const char *model,
+				      const char *input_text,
+				      const char *system_text,
+				      const char *previous_response_id,
+				      const char *tools_json,
+				      const char *tool_choice)
+{
+	if (!model || !model[0] || !input_text || !input_text[0])
+		return NULL;
+
+	yyjson_mut_doc *doc = yyjson_mut_doc_new(NULL);
+	yyjson_mut_val *root = yyjson_mut_obj(doc);
+	yyjson_mut_doc_set_root(doc, root);
+
+	yyjson_mut_obj_add_str(doc, root, "model", model);
+	if (previous_response_id && previous_response_id[0])
+		yyjson_mut_obj_add_str(doc, root, "previous_response_id", previous_response_id);
+
+	// input: single text item
+	yyjson_mut_val *input = yyjson_mut_arr(doc);
+	yyjson_mut_obj_add_val(doc, root, "input", input);
+	{
+		yyjson_mut_val *msg = yyjson_mut_obj(doc);
+		yyjson_mut_obj_add_str(doc, msg, "role", "user");
+		yyjson_mut_val *content = yyjson_mut_arr(doc);
+		yyjson_mut_obj_add_val(doc, msg, "content", content);
+		yyjson_mut_val *c0 = yyjson_mut_obj(doc);
+		yyjson_mut_obj_add_str(doc, c0, "type", "input_text");
+		yyjson_mut_obj_add_str(doc, c0, "text", input_text);
+		yyjson_mut_arr_add_val(content, c0);
+		yyjson_mut_arr_add_val(input, msg);
+	}
+
+	if (system_text && system_text[0])
+		yyjson_mut_obj_add_str(doc, root, "instructions", system_text);
+
+	if (tool_choice && tool_choice[0]) {
+		// Existing CLI uses tool_choice values like none/auto/required or a tool name.
+		yyjson_mut_obj_add_str(doc, root, "tool_choice", tool_choice);
+	}
+
+	if (tools_json && tools_json[0]) {
+		yyjson_doc *tdoc = yyjson_read(tools_json, strlen(tools_json), 0);
+		if (tdoc) {
+			yyjson_val *troot = yyjson_doc_get_root(tdoc);
+			yyjson_mut_val *tmut = yyjson_val_mut_copy(doc, troot);
+			if (tmut)
+				yyjson_mut_obj_add_val(doc, root, "tools", tmut);
+			yyjson_doc_free(tdoc);
+		}
+	}
+
+	char *json = yyjson_mut_write(doc, 0, NULL);
+	yyjson_mut_doc_free(doc);
+	return json;
+}
+
 int aicli_openai_run_with_tools(const aicli_config_t *cfg,
-                               const aicli_allowlist_t *allow,
-                               const char *user_prompt,
-                               size_t max_turns,
-                               size_t max_tool_calls_per_turn,
-                               size_t tool_threads,
+							   const aicli_allowlist_t *allow,
+							   const char *user_prompt,
+							   const char *previous_response_id,
+							   size_t max_turns,
+							   size_t max_tool_calls_per_turn,
+							   size_t tool_threads,
 			       const char *tool_choice,
-                               char **out_final_text)
+						   char **out_final_text,
+						   char **out_final_response_json)
 {
 	if (out_final_text)
 		*out_final_text = NULL;
+	if (out_final_response_json)
+		*out_final_response_json = NULL;
 	if (!cfg || !user_prompt || !user_prompt[0])
 		return 2;
 	if (max_turns == 0)
@@ -1408,21 +1493,37 @@ int aicli_openai_run_with_tools(const aicli_config_t *cfg,
 
 	const char *model = (cfg->model && cfg->model[0]) ? cfg->model : "gpt-5-mini";
 
-	aicli_openai_request_t req0 = {
-	    .model = model,
-	    .input_text = user_prompt,
-	    .system_text = NULL,
-	};
-
 	aicli_openai_http_response_t http = {0};
 	if (cfg && debug_level_enabled(cfg->debug_api)) {
 		fprintf(stderr, "[debug:api] POST /v1/responses model=%s tool_choice=%s tools=execute\n",
 		        safe_str(model), safe_str(tool_choice));
 	}
-	int rc = aicli_openai_responses_post(cfg->openai_api_key, cfg->openai_base_url,
-	                                   &req0, tools_json, tool_choice, &http);
+	int rc = 0;
+	if (previous_response_id && previous_response_id[0]) {
+		char *payload = build_initial_request_json(model, user_prompt, NULL,
+		                                        previous_response_id, tools_json, tool_choice);
+		if (!payload) {
+			free(tools_json);
+			free(web_fetch_prefixes_buf);
+			aicli_paging_cache_destroy(tool_cache);
+			return 2;
+		}
+		rc = aicli_openai_responses_post_raw_json(cfg->openai_api_key, cfg->openai_base_url,
+		                                       payload, &http);
+		free(payload);
+	} else {
+		aicli_openai_request_t req0 = {
+		    .model = model,
+		    .input_text = user_prompt,
+		    .system_text = NULL,
+		};
+		rc = aicli_openai_responses_post(cfg->openai_api_key, cfg->openai_base_url,
+		                               &req0, tools_json, tool_choice, &http);
+	}
 	if (rc != 0) {
 		free(tools_json);
+		free(web_fetch_prefixes_buf);
+		aicli_paging_cache_destroy(tool_cache);
 		return rc;
 	}
 	if (cfg && debug_level_enabled(cfg->debug_api))
@@ -1464,11 +1565,16 @@ int aicli_openai_run_with_tools(const aicli_config_t *cfg,
 
 		char *final = extract_first_output_text(root);
 		if (final) {
+			if (out_final_response_json) {
+				*out_final_response_json = dup_cstr(http.body);
+			}
 			yyjson_doc_free(doc);
 			if (out_final_text)
 				*out_final_text = final;
 			aicli_openai_http_response_free(&http);
 			free(tools_json);
+			free(web_fetch_prefixes_buf);
+			aicli_paging_cache_destroy(tool_cache);
 			return 0;
 		}
 
@@ -1476,6 +1582,12 @@ int aicli_openai_run_with_tools(const aicli_config_t *cfg,
 		if (!resp_id) {
 			yyjson_doc_free(doc);
 			break;
+		}
+
+		// Keep the latest response JSON so callers can persist response_id (e.g. --continue=next).
+		if (out_final_response_json) {
+			free(*out_final_response_json);
+			*out_final_response_json = dup_cstr(http.body);
 		}
 
 		exec_job_t *jobs = (exec_job_t *)calloc(max_tool_calls_per_turn, sizeof(exec_job_t));
@@ -1782,5 +1894,9 @@ int aicli_openai_run_with_tools(const aicli_config_t *cfg,
 	free(tools_json);
 	free(web_fetch_prefixes_buf);
 	aicli_paging_cache_destroy(tool_cache);
+	if (out_final_response_json) {
+		free(*out_final_response_json);
+		*out_final_response_json = NULL;
+	}
 	return 2;
 }

@@ -1,5 +1,6 @@
 
 #include "cli.h"
+#include "continue_state.h"
 
 #include <errno.h>
 #include <fcntl.h>
@@ -488,7 +489,8 @@ static void usage(FILE *out)
 	        "                    (note: --start/--size are available only with --raw)\n"
 	        "  aicli web fetch <url> [--start N] [--size N]\n"
 	        "  aicli run [--file PATH ...] [--file - | --stdin] [--turns N] [--max-tool-calls N] [--tool-threads N]\n"
-	        "           [--disable-all-tools] [--available-tools TOOL[,TOOL...]] [--force-tool TOOL]\n"
+			"           [--continue[=auto|both|after|next][=THREAD]]\n"
+			"           [--disable-all-tools] [--available-tools TOOL[,TOOL...]] [--force-tool TOOL]\n"
 	        "           [--config PATH] [--no-config]\n"
 	        "           [--debug-all[=LEVEL]] [--debug-api[=LEVEL]] [--debug-function-call[=LEVEL]] [--auto-search] <prompt>\n"
 	        "  aicli --list-tools\n"
@@ -499,6 +501,10 @@ static void usage(FILE *out)
 	        "  3) .aicli.json in $PWD (only if under $HOME)\n"
 	        "  4) .aicli.json in parent dirs up to $HOME\n"
 	        "  5) .aicli.json in $HOME\n"
+			"\n"
+			"Continue:\n"
+			"  --continue saves the last OpenAI response id (response.id) to a per-run state file\n"
+			"  and uses it as previous_response_id on the next run (session continuity).\n"
 	        "\n"
 	        "Environment:\n"
 	        "  AICLI_SEARCH_PROVIDER=google_cse|google|brave (default: google_cse)\n"
@@ -667,8 +673,8 @@ static int cmd_chat(int argc, char **argv, const aicli_config_t *cfg)
 	}
 
 	// Reuse the run pipeline but force tools off by default.
-	// Equivalent to: aicli run --turns 1 --max-tool-calls 1 --tool-threads 1 <prompt>
-	char *args[12];
+	// Equivalent to: aicli run --turns 1 --max-tool-calls 1 --tool-threads 1 --disable-all-tools <prompt>
+	char *args[13];
 	int n = 0;
 	args[n++] = argv[0];
 	args[n++] = "run";
@@ -678,6 +684,7 @@ static int cmd_chat(int argc, char **argv, const aicli_config_t *cfg)
 	args[n++] = "1";
 	args[n++] = "--tool-threads";
 	args[n++] = "1";
+	args[n++] = "--disable-all-tools";
 	args[n++] = argv[2];
 	args[n] = NULL;
 	return cmd_run(n, args, cfg);
@@ -761,9 +768,33 @@ static int cmd_run(int argc, char **argv, const aicli_config_t *cfg)
 	size_t turns = 4;
 	size_t max_tool_calls = 8;
 	size_t tool_threads = 1;
+	aicli_continue_opt_t cont = {0};
+	bool want_continue = false;
+	char prev_id[256];
+	prev_id[0] = '\0';
+	char state_path[4096];
+	state_path[0] = '\0';
 
 	int i = 2;
 	while (i < argc && strncmp(argv[i], "--", 2) == 0) {
+		if (strcmp(argv[i], "--continue") == 0 || strncmp(argv[i], "--continue=", 11) == 0) {
+			const char *optarg = NULL;
+			if (argv[i][10] == '=')
+				optarg = argv[i] + 11;
+			else if (i + 1 < argc && argv[i + 1][0] != '-')
+				optarg = argv[i + 1];
+			if (aicli_continue_parse(optarg, &cont) != 0) {
+				fprintf(stderr,
+				        "invalid --continue (expected: [auto|both|after|next][=THREAD] or THREAD)\n");
+				return 2;
+			}
+			want_continue = true;
+			if (!(argv[i][10] == '=') && optarg == argv[i + 1])
+				i += 2;
+			else
+				i += 1;
+			continue;
+		}
 		if (strcmp(argv[i], "--stdin") == 0) {
 			use_stdin = true;
 			i += 1;
@@ -913,6 +944,24 @@ static int cmd_run(int argc, char **argv, const aicli_config_t *cfg)
 		return 2;
 	}
 	const char *prompt = argv[i];
+
+	const char *previous_response_id = NULL;
+	if (want_continue) {
+		if (aicli_continue_state_path(state_path, sizeof(state_path), (long)getpid(), &cont) != 0) {
+			fprintf(stderr, "failed to compute --continue state path\n");
+			return 2;
+		}
+		int rrc = aicli_continue_read_id(state_path, prev_id, sizeof(prev_id));
+		if (rrc == 0) {
+			previous_response_id = prev_id;
+		} else if (rrc == 1) {
+			// Missing state is OK: we will just start a new conversation.
+			previous_response_id = NULL;
+		} else {
+			fprintf(stderr, "failed to read --continue state file: %s\n", state_path);
+			return 2;
+		}
+	}
 
 	// stdin -> temp file -> allowlist
 	if (use_stdin) {
@@ -1193,6 +1242,7 @@ static int cmd_run(int argc, char **argv, const aicli_config_t *cfg)
 	}
 	aicli_allowlist_t allow = {.files = allow_files, .file_count = file_count};
 	char *final_text = NULL;
+	char *final_response_json = NULL;
 	const char *to_send = augmented_prompt ? augmented_prompt : prompt;
 	// tool_choice semantics (Responses API): "none" disables, "auto" lets model decide,
 	// or force a specific tool by name.
@@ -1217,8 +1267,37 @@ static int cmd_run(int argc, char **argv, const aicli_config_t *cfg)
 	memcpy(&cfg_local, cfg, sizeof(cfg_local));
 	cfg_local.debug_api = debug_api;
 	cfg_local.debug_function_call = debug_function_call;
-	int rc = aicli_openai_run_with_tools(&cfg_local, &allow, to_send, turns, max_tool_calls,
-	                                   tool_threads, tool_choice, &final_text);
+	int rc = aicli_openai_run_with_tools(&cfg_local, &allow, to_send, previous_response_id, turns,
+	                                   (size_t)max_tool_calls, tool_threads,
+	                                   tool_choice, &final_text, &final_response_json);
+	if (want_continue) {
+			bool should_write = false;
+			if (cont.mode == AICLI_CONTINUE_BOTH)
+				should_write = true;
+			else if (cont.mode == AICLI_CONTINUE_AFTER)
+				should_write = (rc == 0);
+			else if (cont.mode == AICLI_CONTINUE_NEXT)
+				should_write = (rc == 0);
+			else /* auto */
+				should_write = (rc == 0);
+
+		if (should_write) {
+			// Best-effort: if we have previous already, keep it if we can't extract new.
+			char rid[256];
+			rid[0] = '\0';
+			const char *to_write = NULL;
+			if (final_response_json && final_response_json[0] &&
+			    aicli_openai_extract_response_id(final_response_json, strlen(final_response_json), rid,
+			                                 sizeof(rid)) == 0) {
+				to_write = rid;
+			} else if (previous_response_id && previous_response_id[0]) {
+				// Fallback: keep continuity from what we used.
+				to_write = previous_response_id;
+			}
+			if (to_write && state_path[0])
+				(void)aicli_continue_write_id(state_path, to_write);
+		}
+	}
 	free(augmented_prompt);
 	// Free allowlisted paths after the tool loop finishes.
 	for (int fi = 0; fi < file_count; fi++)
@@ -1229,6 +1308,7 @@ static int cmd_run(int argc, char **argv, const aicli_config_t *cfg)
 	if (rc != 0) {
 		fprintf(stderr, "openai request failed\n");
 		free(final_text);
+		free(final_response_json);
 		return 2;
 	}
 
@@ -1236,10 +1316,12 @@ static int cmd_run(int argc, char **argv, const aicli_config_t *cfg)
 		fputs(final_text, stdout);
 		fputc('\n', stdout);
 		free(final_text);
+		free(final_response_json);
 		return 0;
 	}
 
 	free(final_text);
+	free(final_response_json);
 	// Should be unreachable: openai_tool_loop returns non-zero if it can't extract output.
 	fprintf(stderr, "openai response had no output_text\n");
 	return 2;
