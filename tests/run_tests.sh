@@ -19,6 +19,28 @@ readme="$repo_root/README.md"
 tmpdir="$repo_root/tests/tmp"
 mkdir -p "$tmpdir"
 
+assert_contains() {
+	local hay="$1"
+	local needle="$2"
+	echo "$hay" | grep -F -q -- "$needle" || {
+		echo "assert_contains failed: expected '$needle'" >&2
+		echo "--- output ---" >&2
+		echo "$hay" >&2
+		exit 1
+	}
+}
+
+assert_not_contains() {
+	local hay="$1"
+	local needle="$2"
+	if echo "$hay" | grep -F -q -- "$needle"; then
+		echo "assert_not_contains failed: did not expect '$needle'" >&2
+		echo "--- output ---" >&2
+		echo "$hay" >&2
+		exit 1
+	fi
+}
+
 # Minimal smoke test: binary runs and prints help
 "$bin" --help >/dev/null
 "$bin" chat "hi" >/dev/null 2>&1 || true
@@ -26,6 +48,17 @@ mkdir -p "$tmpdir"
 # execute MVP: cat only
 out=$("$bin" _exec --file "$readme" "cat $readme" 2>/dev/null | head -c 4)
 test "$out" = "# ai"
+
+# grep -v (invert match)
+out=$("$bin" _exec --file "$readme" "cat \"$readme\" | grep -v '^#'" 2>/dev/null | tr -d '\r')
+assert_contains "$out" "aicli"
+assert_not_contains "$out" "# aicli"
+echo "ok: grep -v"
+
+out=$("$bin" _exec --file "$readme" "cat \"$readme\" | grep -n -v '^#'" 2>/dev/null | tr -d '\r')
+assert_contains "$out" "2:"
+assert_not_contains "$out" "# aicli"
+echo "ok: grep -n -v"
 
 # pipe: nl + head
 line1=$("$bin" _exec --file "$readme" "cat $readme | nl | head -n 1" 2>/dev/null | tr -d '\r')

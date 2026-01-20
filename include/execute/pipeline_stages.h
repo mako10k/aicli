@@ -16,6 +16,11 @@ bool aicli_stage_grep_fixed(const char *in, size_t in_len, const char *needle,
                             bool with_line_numbers, aicli_buf_t *out);
 bool aicli_stage_grep_bre(const char *in, size_t in_len, const char *pattern,
                           bool with_line_numbers, aicli_buf_t *out);
+
+bool aicli_stage_grep_fixed_invert(const char *in, size_t in_len, const char *needle,
+					 bool with_line_numbers, aicli_buf_t *out);
+bool aicli_stage_grep_bre_invert(const char *in, size_t in_len, const char *pattern,
+					bool with_line_numbers, aicli_buf_t *out);
 bool aicli_stage_sed_n_addr(const char *in, size_t in_len, size_t start_addr, size_t end_addr,
                             char cmd, aicli_buf_t *out);
 
@@ -32,7 +37,7 @@ size_t aicli_parse_tail_n(const aicli_dsl_stage_t *st, bool *ok);
 bool aicli_parse_wc_mode(const aicli_dsl_stage_t *st, char *out_mode);
 bool aicli_parse_sort_reverse(const aicli_dsl_stage_t *st, bool *out_reverse);
 bool aicli_parse_grep_args(const aicli_dsl_stage_t *st, const char **out_pattern, bool *out_n,
-                           bool *out_fixed);
+                           bool *out_fixed, bool *out_invert);
 bool aicli_parse_sed_args(const aicli_dsl_stage_t *st, size_t *out_start, size_t *out_end,
                           char *out_cmd);
 

@@ -206,7 +206,7 @@ bool aicli_stage_sort_lines(const char *in, size_t in_len, bool reverse, aicli_b
 }
 
 bool aicli_stage_grep_fixed(const char *in, size_t in_len, const char *needle, bool with_line_numbers,
-                            aicli_buf_t *out)
+			    aicli_buf_t *out)
 {
 	if (!needle || needle[0] == '\0')
 		return true;
@@ -234,6 +234,56 @@ bool aicli_stage_grep_fixed(const char *in, size_t in_len, const char *needle, b
 			}
 
 			if (match) {
+				if (with_line_numbers) {
+					char prefix[32];
+					int n = snprintf(prefix, sizeof(prefix), "%lu:", line_no);
+					if (n < 0)
+						return false;
+					if (!aicli_buf_append(out, prefix, (size_t)n))
+						return false;
+				}
+				if (line_len > 0) {
+					if (!aicli_buf_append(out, line, line_len))
+						return false;
+				}
+				if (!aicli_buf_append(out, "\n", 1))
+					return false;
+			}
+
+			line_no++;
+			line_start = i + 1;
+		}
+		i++;
+	}
+	return true;
+}
+
+bool aicli_stage_grep_fixed_invert(const char *in, size_t in_len, const char *needle,
+				   bool with_line_numbers, aicli_buf_t *out)
+{
+	if (!needle || needle[0] == '\0')
+		return true;
+	const size_t needle_len = strlen(needle);
+
+	unsigned long line_no = 1;
+	size_t i = 0;
+	size_t line_start = 0;
+	while (i <= in_len) {
+		if (i == in_len || in[i] == '\n') {
+			size_t line_len = i - line_start;
+			const char *line = in + line_start;
+
+			bool match = false;
+			if (needle_len <= line_len) {
+				for (size_t off = 0; off + needle_len <= line_len; off++) {
+					if (memcmp(line + off, needle, needle_len) == 0) {
+						match = true;
+						break;
+					}
+				}
+			}
+
+			if (!match) {
 				if (with_line_numbers) {
 					char prefix[32];
 					int n = snprintf(prefix, sizeof(prefix), "%lu:", line_no);
@@ -308,6 +358,89 @@ bool aicli_stage_grep_bre(const char *in, size_t in_len, const char *pattern, bo
 			}
 
 			if (match) {
+				if (with_line_numbers) {
+					char prefix[32];
+					int n = snprintf(prefix, sizeof(prefix), "%lu:", line_no);
+					if (n < 0) {
+						regfree(&rx);
+						return false;
+					}
+					if (!aicli_buf_append(out, prefix, (size_t)n)) {
+						regfree(&rx);
+						return false;
+					}
+				}
+				if (line_len > 0) {
+					if (!aicli_buf_append(out, line, line_len)) {
+						regfree(&rx);
+						return false;
+					}
+				}
+				if (!aicli_buf_append(out, "\n", 1)) {
+					regfree(&rx);
+					return false;
+				}
+			}
+
+			line_no++;
+			line_start = i + 1;
+		}
+		i++;
+	}
+
+	regfree(&rx);
+	return true;
+}
+
+bool aicli_stage_grep_bre_invert(const char *in, size_t in_len, const char *pattern,
+				 bool with_line_numbers, aicli_buf_t *out)
+{
+	if (!pattern || pattern[0] == '\0')
+		return true;
+
+	regex_t rx;
+	memset(&rx, 0, sizeof(rx));
+	int rc = regcomp(&rx, pattern, 0);
+	if (rc != 0) {
+		char errbuf[256];
+		regerror(rc, &rx, errbuf, sizeof(errbuf));
+		aicli_buf_append(out, "grep: ", 6);
+		aicli_buf_append(out, errbuf, strlen(errbuf));
+		aicli_buf_append(out, "\n", 1);
+		regfree(&rx);
+		return false;
+	}
+
+	unsigned long line_no = 1;
+	size_t i = 0;
+	size_t line_start = 0;
+	while (i <= in_len) {
+		if (i == in_len || in[i] == '\n') {
+			size_t line_len = i - line_start;
+			const char *line = in + line_start;
+
+			char *z = (char *)malloc(line_len + 1);
+			if (!z) {
+				regfree(&rx);
+				return false;
+			}
+			memcpy(z, line, line_len);
+			z[line_len] = '\0';
+
+			int er = regexec(&rx, z, 0, NULL, 0);
+			free(z);
+			bool match = (er == 0);
+			if (er != 0 && er != REG_NOMATCH) {
+				char errbuf[256];
+				regerror(er, &rx, errbuf, sizeof(errbuf));
+				aicli_buf_append(out, "grep: ", 6);
+				aicli_buf_append(out, errbuf, strlen(errbuf));
+				aicli_buf_append(out, "\n", 1);
+				regfree(&rx);
+				return false;
+			}
+
+			if (!match) {
 				if (with_line_numbers) {
 					char prefix[32];
 					int n = snprintf(prefix, sizeof(prefix), "%lu:", line_no);
@@ -792,33 +925,46 @@ bool aicli_parse_sort_reverse(const aicli_dsl_stage_t *st, bool *out_reverse)
 	return false;
 }
 
-bool aicli_parse_grep_args(const aicli_dsl_stage_t *st, const char **out_pattern, bool *out_n, bool *out_fixed)
+bool aicli_parse_grep_args(const aicli_dsl_stage_t *st, const char **out_pattern, bool *out_n, bool *out_fixed,
+			   bool *out_invert)
 {
 	// grep PATTERN | grep -n PATTERN | grep -F PATTERN | grep -n -F PATTERN
+	// + optional -v (invert match)
 	const char *a[8];
 	int ac = 0;
 	aicli_dsl_strip_double_dash(st, a, &ac);
 	if (ac == 2) {
 		*out_n = false;
 		*out_fixed = false;
+		*out_invert = false;
 		*out_pattern = a[1];
 		return true;
 	}
 	if (ac == 3 && strcmp(a[1], "-n") == 0) {
 		*out_n = true;
 		*out_fixed = false;
+		*out_invert = false;
 		*out_pattern = a[2];
 		return true;
 	}
 	if (ac == 3 && strcmp(a[1], "-F") == 0) {
 		*out_n = false;
 		*out_fixed = true;
+		*out_invert = false;
+		*out_pattern = a[2];
+		return true;
+	}
+	if (ac == 3 && strcmp(a[1], "-v") == 0) {
+		*out_n = false;
+		*out_fixed = false;
+		*out_invert = true;
 		*out_pattern = a[2];
 		return true;
 	}
 	if (ac == 4) {
 		bool n = false;
 		bool fixed = false;
+		bool inv = false;
 		int opt_cnt = 0;
 		for (int i = 1; i <= 2; i++) {
 			if (strcmp(a[i], "-n") == 0) {
@@ -831,11 +977,49 @@ bool aicli_parse_grep_args(const aicli_dsl_stage_t *st, const char **out_pattern
 				opt_cnt++;
 				continue;
 			}
+			if (strcmp(a[i], "-v") == 0) {
+				inv = true;
+				opt_cnt++;
+				continue;
+			}
 		}
 		if (opt_cnt == 2) {
 			*out_n = n;
 			*out_fixed = fixed;
+			*out_invert = inv;
 			*out_pattern = a[3];
+			return true;
+		}
+	}
+	if (ac == 5) {
+		bool n = false;
+		bool fixed = false;
+		bool inv = false;
+		int opt_cnt = 0;
+		for (int i = 1; i <= 3; i++) {
+			if (!a[i])
+				continue;
+			if (strcmp(a[i], "-n") == 0) {
+				n = true;
+				opt_cnt++;
+				continue;
+			}
+			if (strcmp(a[i], "-F") == 0) {
+				fixed = true;
+				opt_cnt++;
+				continue;
+			}
+			if (strcmp(a[i], "-v") == 0) {
+				inv = true;
+				opt_cnt++;
+				continue;
+			}
+		}
+		if (opt_cnt == 3) {
+			*out_n = n;
+			*out_fixed = fixed;
+			*out_invert = inv;
+			*out_pattern = a[4];
 			return true;
 		}
 	}

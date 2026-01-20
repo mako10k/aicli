@@ -59,10 +59,16 @@ static bool apply_grep(const aicli_dsl_stage_t *stg, const char *in, size_t in_l
 	const char *pattern = NULL;
 	bool with_n = false;
 	bool fixed = false;
-	if (!aicli_parse_grep_args(stg, &pattern, &with_n, &fixed))
+	bool invert = false;
+	if (!aicli_parse_grep_args(stg, &pattern, &with_n, &fixed, &invert))
 		return false;
-	if (fixed)
+	if (fixed) {
+		if (invert)
+			return aicli_stage_grep_fixed_invert(in, in_len, pattern, with_n, out);
 		return aicli_stage_grep_fixed(in, in_len, pattern, with_n, out);
+	}
+	if (invert)
+		return aicli_stage_grep_bre_invert(in, in_len, pattern, with_n, out);
 	return aicli_stage_grep_bre(in, in_len, pattern, with_n, out);
 }
 
