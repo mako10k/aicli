@@ -40,6 +40,15 @@ test "$g1" = $'foo\nfoo bar'
 g2=$("$bin" _exec --file tmp/grep.txt "cat tmp/grep.txt | grep -n bar" 2>/dev/null | tr -d '\r')
 test "$g2" = $'2:bar\n3:foo bar'
 
+# dsl: backslash escapes + double quotes
+printf "hello world\n" > tmp/esc.txt
+q1=$("$bin" _exec --file tmp/esc.txt "cat tmp/esc.txt | grep \"hello\\ world\"" 2>/dev/null | tr -d '\r')
+test "$q1" = "hello world"
+
+# dsl: end-of-options marker '--'
+q2=$("$bin" _exec --file tmp/esc.txt "cat tmp/esc.txt | grep -- \"hello world\"" 2>/dev/null | tr -d '\r')
+test "$q2" = "hello world"
+
 # pipe: sed (line address)
 printf "l1\nl2\nl3\n" > tmp/sed.txt
 s1=$("$bin" _exec --file tmp/sed.txt "cat tmp/sed.txt | sed -n '2p'" 2>/dev/null | tr -d '\r')

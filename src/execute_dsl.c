@@ -26,7 +26,21 @@ static bool is_forbidden_char(char c)
 	case '<':
 	case '$':
 	case '`':
-	case '\\':
+	case '\n':
+	case '\r':
+		return true;
+	default:
+		return false;
+	}
+}
+
+static bool is_forbidden_char_in_quote(char c)
+{
+	// Inside quotes we still forbid expansion/substitution metacharacters.
+	// We intentionally allow spaces and '|' as data.
+	switch (c) {
+	case '$':
+	case '`':
 	case '\n':
 	case '\r':
 		return true;
@@ -75,9 +89,19 @@ static bool read_token(const char **p, char *buf, size_t buflen)
 		quote = **p;
 		(*p)++;
 		while (**p && **p != quote) {
+			char ch = **p;
+			if (ch == '\\') {
+				// Minimal backslash escapes inside quotes.
+				(*p)++;
+				if (!**p)
+					return false;
+				ch = **p;
+			}
+			if (is_forbidden_char_in_quote(ch))
+				return false;
 			if (n + 1 >= buflen)
 				return false;
-			buf[n++] = **p;
+			buf[n++] = ch;
 			(*p)++;
 		}
 		if (**p != quote)
@@ -85,11 +109,19 @@ static bool read_token(const char **p, char *buf, size_t buflen)
 		(*p)++;
 	} else {
 		while (**p && !isspace((unsigned char)**p) && **p != '|') {
-			if (is_forbidden_char(**p))
+			char ch = **p;
+			if (ch == '\\') {
+				// Minimal backslash escapes outside quotes (POSIX-ish).
+				(*p)++;
+				if (!**p)
+					return false;
+				ch = **p;
+			}
+			if (is_forbidden_char(ch))
 				return false;
 			if (n + 1 >= buflen)
 				return false;
-			buf[n++] = **p;
+			buf[n++] = ch;
 			(*p)++;
 		}
 	}

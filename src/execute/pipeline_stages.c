@@ -5,6 +5,28 @@
 #include <stdlib.h>
 #include <string.h>
 
+static void aicli_dsl_strip_double_dash(const aicli_dsl_stage_t *st, const char *argv_out[8],
+				       int *argc_out)
+{
+	// POSIX-ish: treat "--" as end of options.
+	// We don't implement option permutations; we just remove the marker.
+	if (!st || !argv_out || !argc_out) {
+		if (argc_out)
+			*argc_out = 0;
+		return;
+	}
+	int n = 0;
+	for (int i = 0; i < st->argc && i < 8; i++) {
+		const char *a = st->argv[i];
+		if (a && strcmp(a, "--") == 0)
+			continue;
+		argv_out[n++] = a;
+	}
+	for (int i = n; i < 8; i++)
+		argv_out[i] = NULL;
+	*argc_out = n;
+}
+
 bool aicli_stage_nl(const char *in, size_t in_len, aicli_buf_t *out)
 {
 	// Simple line numbering: "     1\t..."
@@ -307,11 +329,14 @@ size_t aicli_parse_head_n(const aicli_dsl_stage_t *st, bool *ok)
 {
 	*ok = true;
 	// head -n N
-	if (st->argc == 1)
+	const char *a[8];
+	int ac = 0;
+	aicli_dsl_strip_double_dash(st, a, &ac);
+	if (ac == 1)
 		return 10;
-	if (st->argc == 3 && strcmp(st->argv[1], "-n") == 0) {
+	if (ac == 3 && strcmp(a[1], "-n") == 0) {
 		char *end = NULL;
-		unsigned long v = strtoul(st->argv[2], &end, 10);
+		unsigned long v = strtoul(a[2], &end, 10);
 		if (!end || *end != '\0') {
 			*ok = false;
 			return 0;
@@ -326,11 +351,14 @@ size_t aicli_parse_tail_n(const aicli_dsl_stage_t *st, bool *ok)
 {
 	*ok = true;
 	// tail -n N
-	if (st->argc == 1)
+	const char *a[8];
+	int ac = 0;
+	aicli_dsl_strip_double_dash(st, a, &ac);
+	if (ac == 1)
 		return 10;
-	if (st->argc == 3 && strcmp(st->argv[1], "-n") == 0) {
+	if (ac == 3 && strcmp(a[1], "-n") == 0) {
 		char *end = NULL;
-		unsigned long v = strtoul(st->argv[2], &end, 10);
+		unsigned long v = strtoul(a[2], &end, 10);
 		if (!end || *end != '\0') {
 			*ok = false;
 			return 0;
@@ -344,13 +372,16 @@ size_t aicli_parse_tail_n(const aicli_dsl_stage_t *st, bool *ok)
 bool aicli_parse_wc_mode(const aicli_dsl_stage_t *st, char *out_mode)
 {
 	// wc -l | wc -c
-	if (st->argc != 2)
+	const char *a[8];
+	int ac = 0;
+	aicli_dsl_strip_double_dash(st, a, &ac);
+	if (ac != 2)
 		return false;
-	if (strcmp(st->argv[1], "-l") == 0) {
+	if (strcmp(a[1], "-l") == 0) {
 		*out_mode = 'l';
 		return true;
 	}
-	if (strcmp(st->argv[1], "-c") == 0) {
+	if (strcmp(a[1], "-c") == 0) {
 		*out_mode = 'c';
 		return true;
 	}
@@ -360,11 +391,14 @@ bool aicli_parse_wc_mode(const aicli_dsl_stage_t *st, char *out_mode)
 bool aicli_parse_sort_reverse(const aicli_dsl_stage_t *st, bool *out_reverse)
 {
 	// sort | sort -r
-	if (st->argc == 1) {
+	const char *a[8];
+	int ac = 0;
+	aicli_dsl_strip_double_dash(st, a, &ac);
+	if (ac == 1) {
 		*out_reverse = false;
 		return true;
 	}
-	if (st->argc == 2 && strcmp(st->argv[1], "-r") == 0) {
+	if (ac == 2 && strcmp(a[1], "-r") == 0) {
 		*out_reverse = true;
 		return true;
 	}
@@ -374,14 +408,17 @@ bool aicli_parse_sort_reverse(const aicli_dsl_stage_t *st, bool *out_reverse)
 bool aicli_parse_grep_args(const aicli_dsl_stage_t *st, const char **out_pattern, bool *out_n)
 {
 	// grep PATTERN | grep -n PATTERN
-	if (st->argc == 2) {
+	const char *a[8];
+	int ac = 0;
+	aicli_dsl_strip_double_dash(st, a, &ac);
+	if (ac == 2) {
 		*out_n = false;
-		*out_pattern = st->argv[1];
+		*out_pattern = a[1];
 		return true;
 	}
-	if (st->argc == 3 && strcmp(st->argv[1], "-n") == 0) {
+	if (ac == 3 && strcmp(a[1], "-n") == 0) {
 		*out_n = true;
-		*out_pattern = st->argv[2];
+		*out_pattern = a[2];
 		return true;
 	}
 	return false;
@@ -390,9 +427,12 @@ bool aicli_parse_grep_args(const aicli_dsl_stage_t *st, const char **out_pattern
 bool aicli_parse_sed_args(const aicli_dsl_stage_t *st, size_t *out_start, size_t *out_end, char *out_cmd)
 {
 	// sed -n 'Np'/'Nd' and 'N,Mp'/'N,Md'
-	if (st->argc != 3)
+	const char *a[8];
+	int ac = 0;
+	aicli_dsl_strip_double_dash(st, a, &ac);
+	if (ac != 3)
 		return false;
-	if (strcmp(st->argv[1], "-n") != 0)
+	if (strcmp(a[1], "-n") != 0)
 		return false;
-	return parse_sed_n_script(st->argv[2], out_start, out_end, out_cmd);
+	return parse_sed_n_script(a[2], out_start, out_end, out_cmd);
 }
