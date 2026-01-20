@@ -212,6 +212,9 @@ bool aicli_stage_grep_fixed(const char *in, size_t in_len, const char *needle, b
 		return true;
 	const size_t needle_len = strlen(needle);
 
+	// If caller passed -F, this function is used for fixed substring search.
+	// (name kept for backward compatibility)
+
 	unsigned long line_no = 1;
 	size_t i = 0;
 	size_t line_start = 0;
@@ -255,6 +258,90 @@ bool aicli_stage_grep_fixed(const char *in, size_t in_len, const char *needle, b
 	return true;
 }
 
+bool aicli_stage_grep_bre(const char *in, size_t in_len, const char *pattern, bool with_line_numbers,
+			  aicli_buf_t *out)
+{
+	if (!pattern || pattern[0] == '\0')
+		return true;
+
+	regex_t rx;
+	memset(&rx, 0, sizeof(rx));
+	int rc = regcomp(&rx, pattern, 0);
+	if (rc != 0) {
+		char errbuf[256];
+		regerror(rc, &rx, errbuf, sizeof(errbuf));
+		aicli_buf_append(out, "grep: ", 6);
+		aicli_buf_append(out, errbuf, strlen(errbuf));
+		aicli_buf_append(out, "\n", 1);
+		regfree(&rx);
+		return false;
+	}
+
+	unsigned long line_no = 1;
+	size_t i = 0;
+	size_t line_start = 0;
+	while (i <= in_len) {
+		if (i == in_len || in[i] == '\n') {
+			size_t line_len = i - line_start;
+			const char *line = in + line_start;
+
+			// NUL-terminate for regexec.
+			char *z = (char *)malloc(line_len + 1);
+			if (!z) {
+				regfree(&rx);
+				return false;
+			}
+			memcpy(z, line, line_len);
+			z[line_len] = '\0';
+
+			int er = regexec(&rx, z, 0, NULL, 0);
+			free(z);
+			bool match = (er == 0);
+			if (er != 0 && er != REG_NOMATCH) {
+				char errbuf[256];
+				regerror(er, &rx, errbuf, sizeof(errbuf));
+				aicli_buf_append(out, "grep: ", 6);
+				aicli_buf_append(out, errbuf, strlen(errbuf));
+				aicli_buf_append(out, "\n", 1);
+				regfree(&rx);
+				return false;
+			}
+
+			if (match) {
+				if (with_line_numbers) {
+					char prefix[32];
+					int n = snprintf(prefix, sizeof(prefix), "%lu:", line_no);
+					if (n < 0) {
+						regfree(&rx);
+						return false;
+					}
+					if (!aicli_buf_append(out, prefix, (size_t)n)) {
+						regfree(&rx);
+						return false;
+					}
+				}
+				if (line_len > 0) {
+					if (!aicli_buf_append(out, line, line_len)) {
+						regfree(&rx);
+						return false;
+					}
+				}
+				if (!aicli_buf_append(out, "\n", 1)) {
+					regfree(&rx);
+					return false;
+				}
+			}
+
+			line_no++;
+			line_start = i + 1;
+		}
+		i++;
+	}
+
+	regfree(&rx);
+	return true;
+}
+
 static bool parse_sed_n_script(const char *script, size_t *out_start, size_t *out_end, char *out_cmd)
 {
 	// Accept only:
@@ -292,6 +379,212 @@ static bool parse_sed_n_script(const char *script, size_t *out_start, size_t *ou
 	*out_start = (size_t)v1;
 	*out_end = (size_t)v2;
 	*out_cmd = *end;
+	return true;
+}
+
+static bool parse_sed_re_addr(const char *s, const char **out_re, size_t *out_re_len, const char **out_end)
+{
+	// Parse /RE/ where delimiter is fixed '/'. RE must be non-empty.
+	if (!s || s[0] != '/')
+		return false;
+	const char *re = s + 1;
+	const char *end = strchr(re, '/');
+	if (!end || end == re)
+		return false;
+	*out_re = re;
+	*out_re_len = (size_t)(end - re);
+	*out_end = end + 1;
+	return true;
+}
+
+static bool parse_sed_re_script(const char *script, const char **out_re1, size_t *out_re1_len,
+				const char **out_re2, size_t *out_re2_len, char *out_cmd)
+{
+	// Accept only:
+	//   /RE/p  /RE/d
+	//   /RE/,/RE/p  /RE/,/RE/d
+	// Delimiter is fixed to '/'. No escaping supported (safe subset).
+	if (!script || !*script)
+		return false;
+
+	const char *re1 = NULL;
+	size_t re1_len = 0;
+	const char *p = NULL;
+	if (!parse_sed_re_addr(script, &re1, &re1_len, &p))
+		return false;
+
+	const char *re2 = NULL;
+	size_t re2_len = 0;
+	if (p[0] == ',') {
+		p++;
+		if (!parse_sed_re_addr(p, &re2, &re2_len, &p))
+			return false;
+	}
+
+	if (p[0] != 'p' && p[0] != 'd')
+		return false;
+	if (p[1] != '\0')
+		return false;
+
+	*out_re1 = re1;
+	*out_re1_len = re1_len;
+	*out_re2 = re2;
+	*out_re2_len = re2_len;
+	*out_cmd = p[0];
+	return true;
+}
+
+bool aicli_parse_sed_re_args(const aicli_dsl_stage_t *st, const char **out_re1, size_t *out_re1_len,
+			    const char **out_re2, size_t *out_re2_len, char *out_cmd)
+{
+	// sed -n '/RE/p' '/RE/d' '/RE/,/RE/p' '/RE/,/RE/d'
+	const char *a[8];
+	int ac = 0;
+	aicli_dsl_strip_double_dash(st, a, &ac);
+	if (ac != 3)
+		return false;
+	if (strcmp(a[1], "-n") != 0)
+		return false;
+
+	return parse_sed_re_script(a[2], out_re1, out_re1_len, out_re2, out_re2_len, out_cmd);
+}
+
+bool aicli_stage_sed_n_re_addr(const char *in, size_t in_len, const char *re1, size_t re1_len,
+			      const char *re2, size_t re2_len, char cmd, aicli_buf_t *out)
+{
+	if (!in || !out || !re1 || re1_len == 0)
+		return false;
+
+	char *re1_z = (char *)malloc(re1_len + 1);
+	if (!re1_z)
+		return false;
+	memcpy(re1_z, re1, re1_len);
+	re1_z[re1_len] = '\0';
+
+	char *re2_z = NULL;
+	if (re2 && re2_len > 0) {
+		re2_z = (char *)malloc(re2_len + 1);
+		if (!re2_z) {
+			free(re1_z);
+			return false;
+		}
+		memcpy(re2_z, re2, re2_len);
+		re2_z[re2_len] = '\0';
+	}
+
+	regex_t rx1;
+	memset(&rx1, 0, sizeof(rx1));
+	int rc = regcomp(&rx1, re1_z, 0);
+	if (rc != 0) {
+		free(re1_z);
+		free(re2_z);
+		regfree(&rx1);
+		return false;
+	}
+	regex_t rx2;
+	memset(&rx2, 0, sizeof(rx2));
+	bool has_rx2 = false;
+	if (re2_z) {
+		rc = regcomp(&rx2, re2_z, 0);
+		if (rc != 0) {
+			regfree(&rx1);
+			free(re1_z);
+			free(re2_z);
+			regfree(&rx2);
+			return false;
+		}
+		has_rx2 = true;
+	}
+
+	bool in_range = false;
+	unsigned long line_no = 1;
+	size_t i = 0;
+	size_t line_start = 0;
+	while (i <= in_len) {
+		if (i == in_len || in[i] == '\n') {
+			size_t line_len = i - line_start;
+			const char *line = in + line_start;
+
+			char *z = (char *)malloc(line_len + 1);
+			if (!z) {
+				regfree(&rx1);
+				if (has_rx2)
+					regfree(&rx2);
+				free(re1_z);
+				free(re2_z);
+				return false;
+			}
+			memcpy(z, line, line_len);
+			z[line_len] = '\0';
+
+			bool m1 = (regexec(&rx1, z, 0, NULL, 0) == 0);
+			bool m2 = false;
+			if (has_rx2)
+				m2 = (regexec(&rx2, z, 0, NULL, 0) == 0);
+			free(z);
+
+			bool selected = false;
+			if (!has_rx2) {
+				selected = m1;
+			} else {
+				if (!in_range) {
+					if (m1)
+						in_range = true;
+				}
+				if (in_range) {
+					selected = true;
+					if (m2)
+						in_range = false;
+				}
+			}
+
+			bool emit = false;
+			if (cmd == 'p')
+				emit = selected;
+			else if (cmd == 'd')
+				emit = !selected;
+			else {
+				regfree(&rx1);
+				if (has_rx2)
+					regfree(&rx2);
+				free(re1_z);
+				free(re2_z);
+				return false;
+			}
+
+			if (emit) {
+				if (line_len > 0) {
+					if (!aicli_buf_append(out, line, line_len)) {
+						regfree(&rx1);
+						if (has_rx2)
+							regfree(&rx2);
+						free(re1_z);
+						free(re2_z);
+						return false;
+					}
+				}
+				if (!aicli_buf_append(out, "\n", 1)) {
+					regfree(&rx1);
+					if (has_rx2)
+						regfree(&rx2);
+					free(re1_z);
+					free(re2_z);
+					return false;
+				}
+			}
+
+			line_no++;
+			line_start = i + 1;
+		}
+		i++;
+	}
+
+	regfree(&rx1);
+	if (has_rx2)
+		regfree(&rx2);
+	free(re1_z);
+	free(re2_z);
+	(void)line_no;
 	return true;
 }
 
@@ -441,7 +734,7 @@ bool aicli_parse_sort_reverse(const aicli_dsl_stage_t *st, bool *out_reverse)
 	return false;
 }
 
-bool aicli_parse_grep_args(const aicli_dsl_stage_t *st, const char **out_pattern, bool *out_n)
+bool aicli_parse_grep_args(const aicli_dsl_stage_t *st, const char **out_pattern, bool *out_n, bool *out_fixed)
 {
 	// grep PATTERN | grep -n PATTERN | grep -F PATTERN | grep -n -F PATTERN
 	const char *a[8];
@@ -449,21 +742,25 @@ bool aicli_parse_grep_args(const aicli_dsl_stage_t *st, const char **out_pattern
 	aicli_dsl_strip_double_dash(st, a, &ac);
 	if (ac == 2) {
 		*out_n = false;
+		*out_fixed = false;
 		*out_pattern = a[1];
 		return true;
 	}
 	if (ac == 3 && strcmp(a[1], "-n") == 0) {
 		*out_n = true;
+		*out_fixed = false;
 		*out_pattern = a[2];
 		return true;
 	}
 	if (ac == 3 && strcmp(a[1], "-F") == 0) {
 		*out_n = false;
+		*out_fixed = true;
 		*out_pattern = a[2];
 		return true;
 	}
 	if (ac == 4) {
 		bool n = false;
+		bool fixed = false;
 		int opt_cnt = 0;
 		for (int i = 1; i <= 2; i++) {
 			if (strcmp(a[i], "-n") == 0) {
@@ -472,12 +769,14 @@ bool aicli_parse_grep_args(const aicli_dsl_stage_t *st, const char **out_pattern
 				continue;
 			}
 			if (strcmp(a[i], "-F") == 0) {
+				fixed = true;
 				opt_cnt++;
 				continue;
 			}
 		}
 		if (opt_cnt == 2) {
 			*out_n = n;
+			*out_fixed = fixed;
 			*out_pattern = a[3];
 			return true;
 		}

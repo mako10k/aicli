@@ -49,6 +49,11 @@ test "$g2" = $'2:bar\n3:foo bar'
 g3=$("$bin" _exec --file tmp/grep.txt "cat tmp/grep.txt | grep -F 'foo bar'" 2>/dev/null | tr -d '\r')
 test "$g3" = $'foo bar'
 
+# grep (BRE): '.' should match any char
+printf 'foo\nfoX\nbar\n' > tmp/grep_re.txt
+gr1=$("$bin" _exec --file tmp/grep_re.txt "cat tmp/grep_re.txt | grep 'fo.'" 2>/dev/null | tr -d '\r')
+test "$gr1" = $'foo\nfoX'
+
 # dsl: backslash escapes + double quotes
 printf "hello world\n" > tmp/esc.txt
 q1=$("$bin" _exec --file tmp/esc.txt "cat tmp/esc.txt | grep \"hello\\ world\"" 2>/dev/null | tr -d '\r')
@@ -81,6 +86,18 @@ s3=$("$bin" _exec --file tmp/sed.txt "cat tmp/sed.txt | sed -n '2,3p'" 2>/dev/nu
 test "$s3" = $'l2\nl3'
 s4=$("$bin" _exec --file tmp/sed.txt "cat tmp/sed.txt | sed -n '2,3d'" 2>/dev/null | tr -d '\r')
 test "$s4" = $'l1'
+
+# sed (BRE address): /RE/p and /RE/d
+printf 'foo\nbar\nfoo bar\n' > tmp/sed_addr_re.txt
+sr1=$("$bin" _exec --file tmp/sed_addr_re.txt "cat tmp/sed_addr_re.txt | sed -n '/foo/p'" 2>/dev/null | tr -d '\r')
+test "$sr1" = $'foo\nfoo bar'
+sr2=$("$bin" _exec --file tmp/sed_addr_re.txt "cat tmp/sed_addr_re.txt | sed -n '/foo/d'" 2>/dev/null | tr -d '\r')
+test "$sr2" = $'bar'
+
+# sed (BRE range address): /RE/,/RE/p
+printf 'x\nA\nmid\nB\ny\n' > tmp/sed_addr_range.txt
+sr3=$("$bin" _exec --file tmp/sed_addr_range.txt "cat tmp/sed_addr_range.txt | sed -n '/A/,/B/p'" 2>/dev/null | tr -d '\r')
+test "$sr3" = $'A\nmid\nB'
 
 # pipe: sed (regex substitution; BRE via regex.h)
 printf "foo\nbar\nfoo bar\n" > tmp/sed_subst.txt

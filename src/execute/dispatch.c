@@ -56,9 +56,12 @@ static bool apply_grep(const aicli_dsl_stage_t *stg, const char *in, size_t in_l
 {
 	const char *pattern = NULL;
 	bool with_n = false;
-	if (!aicli_parse_grep_args(stg, &pattern, &with_n))
+	bool fixed = false;
+	if (!aicli_parse_grep_args(stg, &pattern, &with_n, &fixed))
 		return false;
-	return aicli_stage_grep_fixed(in, in_len, pattern, with_n, out);
+	if (fixed)
+		return aicli_stage_grep_fixed(in, in_len, pattern, with_n, out);
+	return aicli_stage_grep_bre(in, in_len, pattern, with_n, out);
 }
 
 static bool apply_sed(const aicli_dsl_stage_t *stg, const char *in, size_t in_len, aicli_buf_t *out)
@@ -69,6 +72,13 @@ static bool apply_sed(const aicli_dsl_stage_t *stg, const char *in, size_t in_le
 	char cmd = 0;
 	if (aicli_parse_sed_args(stg, &start_addr, &end_addr, &cmd))
 		return aicli_stage_sed_n_addr(in, in_len, start_addr, end_addr, cmd, out);
+
+	const char *re1 = NULL;
+	size_t re1_len = 0;
+	const char *re2 = NULL;
+	size_t re2_len = 0;
+	if (aicli_parse_sed_re_args(stg, &re1, &re1_len, &re2, &re2_len, &cmd))
+		return aicli_stage_sed_n_re_addr(in, in_len, re1, re1_len, re2, re2_len, cmd, out);
 
 	const char *pattern = NULL;
 	const char *repl = NULL;
