@@ -480,38 +480,42 @@ static int cmd_exec_local(int argc, char **argv)
 
 static void usage(FILE *out)
 {
-	fprintf(out,
-	        "aicli - lightweight native OpenAI client\n\n"
-	        "Usage:\n"
-	        "  aicli _exec [--file PATH ...] [--file - | --stdin] [--start N] [--size N] <cmd>\n"
-	        "  aicli chat <prompt>\n"
-	        "  aicli web search <query> [--count N] [--lang xx] [--freshness day|week|month] [--max-title N] [--max-url N] [--max-snippet N] [--width N] [--raw]\n"
-	        "                    (note: --start/--size are available only with --raw)\n"
-	        "  aicli web fetch <url> [--start N] [--size N]\n"
-	        "  aicli run [--file PATH ...] [--file - | --stdin] [--turns N] [--max-tool-calls N] [--tool-threads N]\n"
-			"           [--continue[=auto|both|after|next][=THREAD]]\n"
-			"           [--disable-all-tools] [--available-tools TOOL[,TOOL...]] [--force-tool TOOL]\n"
-	        "           [--config PATH] [--no-config]\n"
-	        "           [--debug-all[=LEVEL]] [--debug-api[=LEVEL]] [--debug-function-call[=LEVEL]] [--auto-search] <prompt>\n"
-	        "  aicli --list-tools\n"
-	        "\n"
-	        "Config (highest priority wins):\n"
-	        "  1) command line options\n"
-	        "  2) environment variables\n"
-	        "  3) .aicli.json in $PWD (only if under $HOME)\n"
-	        "  4) .aicli.json in parent dirs up to $HOME\n"
-	        "  5) .aicli.json in $HOME\n"
-			"\n"
-			"Continue:\n"
-			"  --continue saves the last OpenAI response id (response.id) to a state file keyed by getsid(0)\n"
-			"  and uses it as previous_response_id on the next run (session continuity).\n"
-	        "\n"
-	        "Environment:\n"
-	        "  AICLI_SEARCH_PROVIDER=google_cse|google|brave (default: google_cse)\n"
-	        "  AICLI_WEB_FETCH_PREFIXES=prefix1,prefix2,... (enables web fetch allowlist)\n"
-	        "  GOOGLE_API_KEY=...\n"
-	        "  GOOGLE_CSE_CX=...\n"
-	        "  BRAVE_API_KEY=... (when provider=brave)\n");
+	fputs(aicli_cli_usage_string(), out);
+}
+
+const char *aicli_cli_usage_string(void)
+{
+	return "aicli - lightweight native OpenAI client\n\n"
+	       "Usage:\n"
+	       "  aicli _exec [--file PATH ...] [--file - | --stdin] [--start N] [--size N] <cmd>\n"
+	       "  aicli chat <prompt>\n"
+	       "  aicli web search <query> [--count N] [--lang xx] [--freshness day|week|month] [--max-title N] [--max-url N] [--max-snippet N] [--width N] [--raw]\n"
+	       "                    (note: --start/--size are available only with --raw)\n"
+	       "  aicli web fetch <url> [--start N] [--size N]\n"
+	       "  aicli run [--file PATH ...] [--file - | --stdin] [--turns N] [--max-tool-calls N] [--tool-threads N]\n"
+	       "           [--continue[=auto|both|after|next][=THREAD]]\n"
+	       "           [--disable-all-tools] [--available-tools TOOL[,TOOL...]] [--force-tool TOOL]\n"
+	       "           [--config PATH] [--no-config]\n"
+	       "           [--debug-all[=LEVEL]] [--debug-api[=LEVEL]] [--debug-function-call[=LEVEL]] [--auto-search] <prompt>\n"
+	       "  aicli --list-tools\n"
+	       "\n"
+	       "Config (highest priority wins):\n"
+	       "  1) command line options\n"
+	       "  2) environment variables\n"
+	       "  3) .aicli.json in $PWD (only if under $HOME)\n"
+	       "  4) .aicli.json in parent dirs up to $HOME\n"
+	       "  5) .aicli.json in $HOME\n"
+	       "\n"
+	       "Continue:\n"
+	       "  --continue saves the last OpenAI response id (response.id) to a state file keyed by getsid(0)\n"
+	       "  and uses it as previous_response_id on the next run (session continuity).\n"
+	       "\n"
+	       "Environment:\n"
+	       "  AICLI_SEARCH_PROVIDER=google_cse|google|brave (default: google_cse)\n"
+	       "  AICLI_WEB_FETCH_PREFIXES=prefix1,prefix2,... (enables web fetch allowlist)\n"
+	       "  GOOGLE_API_KEY=...\n"
+	       "  GOOGLE_CSE_CX=...\n"
+	       "  BRAVE_API_KEY=... (when provider=brave)\n";
 }
 
 static void config_apply_env_overrides(aicli_config_t *cfg)

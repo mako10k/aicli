@@ -13,6 +13,7 @@
 #include "buf.h"
 
 #include "allowlist_list_tool.h"
+#include "cli.h"
 #include "paging_cache.h"
 #include "web_search_tool.h"
 #include "web_fetch_tool.h"
@@ -485,6 +486,45 @@ static char *build_execute_tool_json(void)
 	yyjson_mut_arr_add_str(doc, req4, "url");
 	yyjson_mut_obj_add_val(doc, params4, "required", req4);
 
+	// cli_help
+	yyjson_mut_val *tool5 = yyjson_mut_obj(doc);
+	yyjson_mut_arr_add_val(arr, tool5);
+	yyjson_mut_obj_add_str(doc, tool5, "type", "function");
+	yyjson_mut_obj_add_str(doc, tool5, "name", "cli_help");
+	yyjson_mut_obj_add_bool(doc, tool5, "strict", false);
+	yyjson_mut_obj_add_str(doc, tool5, "description",
+	                      "Read-only: return built-in aicli CLI help/usage text. "
+	                      "Use this when you need to tell the user which flags or environment variables are required "
+	                      "(e.g. web_search provider keys, web_fetch allowlist). "
+	                      "Supports paging via start/size.");
+
+	yyjson_mut_val *params5 = yyjson_mut_obj(doc);
+	yyjson_mut_obj_add_val(doc, tool5, "parameters", params5);
+	yyjson_mut_obj_add_str(doc, params5, "type", "object");
+	yyjson_mut_obj_add_bool(doc, params5, "additionalProperties", false);
+
+	yyjson_mut_val *props5 = yyjson_mut_obj(doc);
+	yyjson_mut_obj_add_val(doc, params5, "properties", props5);
+
+	yyjson_mut_val *p_topic5 = yyjson_mut_obj(doc);
+	yyjson_mut_obj_add_str(doc, p_topic5, "type", "string");
+	yyjson_mut_obj_add_str(doc, p_topic5, "description",
+	                      "Optional topic/subcommand, e.g. 'main', 'run', 'web', 'web search', 'web fetch', 'execute'. Defaults to 'main'.");
+	yyjson_mut_obj_add_val(doc, props5, "topic", p_topic5);
+
+	yyjson_mut_val *p_start5 = yyjson_mut_obj(doc);
+	yyjson_mut_obj_add_str(doc, p_start5, "type", "integer");
+	yyjson_mut_obj_add_int(doc, p_start5, "minimum", 0);
+	yyjson_mut_obj_add_str(doc, p_start5, "description", "Byte offset for paging.");
+	yyjson_mut_obj_add_val(doc, props5, "start", p_start5);
+
+	yyjson_mut_val *p_size5 = yyjson_mut_obj(doc);
+	yyjson_mut_obj_add_str(doc, p_size5, "type", "integer");
+	yyjson_mut_obj_add_int(doc, p_size5, "minimum", 1);
+	yyjson_mut_obj_add_int(doc, p_size5, "maximum", 4096);
+	yyjson_mut_obj_add_str(doc, p_size5, "description", "Max bytes to return (<=4096).");
+	yyjson_mut_obj_add_val(doc, props5, "size", p_size5);
+
 	char *json = yyjson_mut_write(doc, 0, NULL);
 	yyjson_mut_doc_free(doc);
 	return json;
@@ -519,6 +559,112 @@ typedef struct {
 	aicli_tool_result_t res;
 	bool done;
 } web_fetch_job_t;
+
+typedef struct {
+	char *topic;
+	size_t start;
+	size_t size;
+	aicli_tool_result_t res;
+	bool done;
+} cli_help_job_t;
+
+static const char *cli_help_select_text(const char *topic)
+{
+	const char *t = topic ? topic : "";
+	while (*t == ' ' || *t == '\t' || *t == '\n' || *t == '\r')
+		t++;
+	if (t[0] == '\0' || strcmp(t, "main") == 0 || strcmp(t, "--help") == 0 || strcmp(t, "help") == 0)
+		return aicli_cli_usage_string();
+	// For now we return the full help; topic exists for forward compatibility.
+	return aicli_cli_usage_string();
+}
+
+static void cli_help_job_main(void *arg)
+{
+	cli_help_job_t *j = (cli_help_job_t *)arg;
+	if (!j)
+		return;
+	memset(&j->res, 0, sizeof(j->res));
+	j->res.exit_code = 0;
+
+	const char *text = cli_help_select_text(j->topic);
+	if (!text)
+		text = "";
+	const size_t total = strlen(text);
+
+	size_t start = j->start;
+	if (start > total)
+		start = total;
+	size_t size = j->size;
+	if (size == 0 || size > 4096)
+		size = 4096;
+	size_t n = total - start;
+	if (n > size)
+		n = size;
+
+	char *out = (char *)malloc(n + 1);
+	if (!out) {
+		j->res.exit_code = 1;
+		j->res.stderr_text = strdup("cli_help: out of memory\n");
+		j->done = true;
+		return;
+	}
+	memcpy(out, text + start, n);
+	out[n] = '\0';
+	j->res.stdout_text = out;
+	j->res.total_bytes = total;
+	j->res.truncated = (start + n) < total;
+	j->res.has_next_start = j->res.truncated;
+	j->res.next_start = j->res.truncated ? (start + n) : 0;
+	j->res.cache_hit = true;
+	j->done = true;
+}
+
+static int parse_cli_help_arguments(yyjson_val *args, char **out_topic, size_t *out_start, size_t *out_size)
+{
+	if (out_topic)
+		*out_topic = NULL;
+	if (out_start)
+		*out_start = 0;
+	if (out_size)
+		*out_size = 0;
+	if (!args)
+		return 0;
+
+	if (yyjson_is_str(args)) {
+		const char *json = yyjson_get_str(args);
+		if (!json)
+			return 0;
+		yyjson_doc *d = yyjson_read(json, strlen(json), 0);
+		if (!d)
+			return 0;
+		yyjson_val *root = yyjson_doc_get_root(d);
+		if (root)
+			(void)parse_cli_help_arguments(root, out_topic, out_start, out_size);
+		yyjson_doc_free(d);
+		return 0;
+	}
+	if (!yyjson_is_obj(args))
+		return 0;
+
+	yyjson_val *topic = yyjson_obj_get(args, "topic");
+	if (topic && yyjson_is_str(topic) && out_topic)
+		*out_topic = dup_cstr(yyjson_get_str(topic));
+
+	yyjson_val *start = yyjson_obj_get(args, "start");
+	if (start && yyjson_is_int(start) && out_start) {
+		int64_t v = yyjson_get_sint(start);
+		if (v >= 0)
+			*out_start = (size_t)v;
+	}
+	yyjson_val *size = yyjson_obj_get(args, "size");
+	if (size && yyjson_is_int(size) && out_size) {
+		int64_t v = yyjson_get_sint(size);
+		if (v > 0)
+			*out_size = (size_t)v;
+	}
+	return 0;
+}
 
 static void free_web_search_request_owned(aicli_web_search_tool_request_t *r)
 {
@@ -1594,13 +1740,15 @@ int aicli_openai_run_with_tools(const aicli_config_t *cfg,
 		list_job_t *ljobs = (list_job_t *)calloc(max_tool_calls_per_turn, sizeof(list_job_t));
 		web_search_job_t *sjobs = (web_search_job_t *)calloc(max_tool_calls_per_turn, sizeof(web_search_job_t));
 		web_fetch_job_t *fjobs = (web_fetch_job_t *)calloc(max_tool_calls_per_turn, sizeof(web_fetch_job_t));
+		cli_help_job_t *hjobs = (cli_help_job_t *)calloc(max_tool_calls_per_turn, sizeof(cli_help_job_t));
 		char **call_ids = (char **)calloc(max_tool_calls_per_turn, sizeof(char *));
 		char **items_json = (char **)calloc(max_tool_calls_per_turn, sizeof(char *));
-		if (!jobs || !ljobs || !sjobs || !fjobs || !call_ids || !items_json) {
+		if (!jobs || !ljobs || !sjobs || !fjobs || !hjobs || !call_ids || !items_json) {
 			free(jobs);
 			free(ljobs);
 			free(sjobs);
 			free(fjobs);
+			free(hjobs);
 			free(call_ids);
 			free(items_json);
 			yyjson_doc_free(doc);
@@ -1613,11 +1761,12 @@ int aicli_openai_run_with_tools(const aicli_config_t *cfg,
 		size_t list_count = 0;
 		size_t web_search_count = 0;
 		size_t web_fetch_count = 0;
+		size_t cli_help_count = 0;
 		{
 			yyjson_val *outarr = find_output_array(root);
 			if (outarr) {
 				size_t idx, max = yyjson_arr_size(outarr);
-				for (idx = 0; idx < max && (exec_count + list_count + web_search_count + web_fetch_count) < max_tool_calls_per_turn; idx++) {
+				for (idx = 0; idx < max && (exec_count + list_count + web_search_count + web_fetch_count + cli_help_count) < max_tool_calls_per_turn; idx++) {
 					yyjson_val *item = yyjson_arr_get(outarr, idx);
 					if (!item || !yyjson_is_obj(item))
 						continue;
@@ -1683,11 +1832,24 @@ int aicli_openai_run_with_tools(const aicli_config_t *cfg,
 						}
 						continue;
 					}
+
+					if (nstr && strcmp(nstr, "cli_help") == 0) {
+						hjobs[cli_help_count].done = false;
+						hjobs[cli_help_count].topic = NULL;
+						hjobs[cli_help_count].start = 0;
+						hjobs[cli_help_count].size = 0;
+						(void)parse_cli_help_arguments(args, &hjobs[cli_help_count].topic,
+						                             &hjobs[cli_help_count].start,
+						                             &hjobs[cli_help_count].size);
+						call_ids[exec_count + list_count + web_search_count + web_fetch_count + cli_help_count] = dup_cstr(cid);
+						cli_help_count++;
+						continue;
+					}
 				}
 			}
 		}
 
-		size_t call_count = exec_count + list_count + web_search_count + web_fetch_count;
+		size_t call_count = exec_count + list_count + web_search_count + web_fetch_count + cli_help_count;
 		if (call_count == 0) {
 			const char *bad_call_id = find_first_execute_call_id(root);
 			if (bad_call_id && bad_call_id[0]) {
@@ -1699,6 +1861,7 @@ int aicli_openai_run_with_tools(const aicli_config_t *cfg,
 			free(ljobs);
 			free(sjobs);
 			free(fjobs);
+			free(hjobs);
 			for (size_t k = 0; k < max_tool_calls_per_turn; k++)
 				free(call_ids[k]);
 			free(call_ids);
@@ -1733,6 +1896,9 @@ int aicli_openai_run_with_tools(const aicli_config_t *cfg,
 		for (size_t i = 0; i < web_fetch_count; i++) {
 			(void)aicli_threadpool_submit(tp, web_fetch_job_main, &fjobs[i]);
 		}
+		for (size_t i = 0; i < cli_help_count; i++) {
+			(void)aicli_threadpool_submit(tp, cli_help_job_main, &hjobs[i]);
+		}
 		aicli_threadpool_drain(tp);
 		aicli_threadpool_destroy(tp);
 
@@ -1764,6 +1930,12 @@ int aicli_openai_run_with_tools(const aicli_config_t *cfg,
 			items_json[exec_count + list_count + web_search_count + i] =
 			    build_function_call_output_item_json(call_ids[exec_count + list_count + web_search_count + i],
 			                                        &fjobs[i].res);
+		}
+		for (size_t i = 0; i < cli_help_count; i++) {
+			items_json[exec_count + list_count + web_search_count + web_fetch_count + i] =
+			    build_function_call_output_item_json(
+			        call_ids[exec_count + list_count + web_search_count + web_fetch_count + i],
+			        &hjobs[i].res);
 		}
 		for (size_t i = 0; i < call_count; i++) {
 			if (!items_json[i] || !items_json[i][0]) {
@@ -1832,6 +2004,11 @@ int aicli_openai_run_with_tools(const aicli_config_t *cfg,
 				free((void *)fjobs[i].res.stdout_text);
 			free_web_fetch_request_owned(&fjobs[i].req);
 		}
+		for (size_t i = 0; i < cli_help_count; i++) {
+			if (hjobs[i].res.stdout_text)
+				free((void *)hjobs[i].res.stdout_text);
+			free(hjobs[i].topic);
+		}
 		for (size_t i = 0; i < call_count; i++) {
 			free(items_json[i]);
 			free(call_ids[i]);
@@ -1839,6 +2016,7 @@ int aicli_openai_run_with_tools(const aicli_config_t *cfg,
 		free(items_json);
 		free(jobs);
 		free(call_ids);
+		free(hjobs);
 		free(ljobs);
 		free(sjobs);
 		free(fjobs);

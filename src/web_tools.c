@@ -52,6 +52,57 @@ static char *dup_cstr(const char *s)
 	return p;
 }
 
+static char *dup_suggest_prefix_from_url(const char *url)
+{
+	if (!url || !url[0])
+		return NULL;
+	const char *p = strstr(url, "://");
+	if (!p)
+		return NULL;
+	const char *scheme = url;
+	size_t scheme_len = (size_t)(p - url);
+	if (scheme_len == 0 || scheme_len > 16)
+		return NULL;
+	p += 3;
+	// Reject userinfo if present (avoid suggesting credentials-bearing prefixes).
+	const char *at = strchr(p, '@');
+	const char *slash = strchr(p, '/');
+	if (at && (!slash || at < slash))
+		return NULL;
+	// Host ends at /, ?, #, or end.
+	const char *end = p;
+	while (*end && *end != '/' && *end != '?' && *end != '#')
+		end++;
+	if (end == p)
+		return NULL;
+	// Drop port if present.
+	const char *host_end = end;
+	for (const char *q = p; q < end; q++) {
+		if (*q == ':') {
+			host_end = q;
+			break;
+		}
+	}
+	if (host_end == p)
+		return NULL;
+
+	size_t host_len = (size_t)(host_end - p);
+	if (host_len == 0 || host_len > 255)
+		return NULL;
+
+	// Build "scheme://host/"
+	size_t out_len = scheme_len + 3 + host_len + 1;
+	char *out = (char *)malloc(out_len + 1);
+	if (!out)
+		return NULL;
+	memcpy(out, scheme, scheme_len);
+	memcpy(out + scheme_len, "://", 3);
+	memcpy(out + scheme_len + 3, p, host_len);
+	out[out_len - 1] = '/';
+	out[out_len] = '\0';
+	return out;
+}
+
 static bool debug_allowlist_enabled(void)
 {
 	const char *v = getenv("AICLI_DEBUG_WEB_FETCH_ALLOWLIST");
@@ -60,14 +111,47 @@ static bool debug_allowlist_enabled(void)
 
 static char *dup_url_not_allowed_debug(const aicli_web_fetch_request_t *req)
 {
+	const char *u = (req && req->url) ? req->url : NULL;
+	char *suggest = dup_suggest_prefix_from_url(u);
+	char hint[512];
+	if (suggest && suggest[0]) (void)snprintf(hint, sizeof(hint),
+	                                         "Try: export AICLI_WEB_FETCH_PREFIXES='%s,https://example.com/,https://docs.example.com/'",
+	                                         suggest);
+	else (void)snprintf(hint, sizeof(hint),
+		            "Try: export AICLI_WEB_FETCH_PREFIXES='https://example.com/,https://docs.example.com/'");
+
 	if (!req)
-		return dup_cstr("url_not_allowed: URL does not match AICLI_WEB_FETCH_PREFIXES");
+	{
+		char msg[900];
+		(void)snprintf(msg, sizeof(msg),
+		              "url_not_allowed: URL does not match AICLI_WEB_FETCH_PREFIXES. %s. "
+		              "Hint for tool-using models: call cli_help(topic=\"web fetch\") to show the exact CLI/env help text.",
+		              hint);
+		free(suggest);
+		return dup_cstr(msg);
+	}
 	if (!debug_allowlist_enabled())
-		return dup_cstr("url_not_allowed: URL does not match AICLI_WEB_FETCH_PREFIXES");
+	{
+		char msg[900];
+		(void)snprintf(msg, sizeof(msg),
+		              "url_not_allowed: URL does not match AICLI_WEB_FETCH_PREFIXES. %s. "
+		              "Hint for tool-using models: call cli_help(topic=\"web fetch\") to show the exact CLI/env help text.",
+		              hint);
+		free(suggest);
+		return dup_cstr(msg);
+	}
 
 	aicli_buf_t b;
 	if (!aicli_buf_init(&b, 256))
-		return dup_cstr("url_not_allowed: URL does not match AICLI_WEB_FETCH_PREFIXES");
+	{
+		char msg[900];
+		(void)snprintf(msg, sizeof(msg),
+		              "url_not_allowed: URL does not match AICLI_WEB_FETCH_PREFIXES. %s. "
+		              "Hint for tool-using models: call cli_help(topic=\"web fetch\") to show the exact CLI/env help text.",
+		              hint);
+		free(suggest);
+		return dup_cstr(msg);
+	}
 	bool ok = true;
 	ok = ok && aicli_buf_append_str(&b, "url_not_allowed: URL does not match AICLI_WEB_FETCH_PREFIXES; allowed_prefixes=");
 	ok = ok && aicli_buf_append_str(&b, "[");
@@ -91,8 +175,15 @@ static char *dup_url_not_allowed_debug(const aicli_web_fetch_request_t *req)
 	ok = ok && aicli_buf_append(&b, "\0", 1);
 	if (!ok) {
 		aicli_buf_free(&b);
-		return dup_cstr("url_not_allowed: URL does not match AICLI_WEB_FETCH_PREFIXES");
+		char fallback[900];
+		(void)snprintf(fallback, sizeof(fallback),
+		              "url_not_allowed: URL does not match AICLI_WEB_FETCH_PREFIXES. %s. "
+		              "Hint for tool-using models: call cli_help(topic=\"web fetch\") to show the exact CLI/env help text.",
+		              hint);
+		free(suggest);
+		return dup_cstr(fallback);
 	}
+	free(suggest);
 	return b.data;
 }
 
@@ -205,7 +296,8 @@ int aicli_web_search_run(const aicli_config_t *cfg,
 	if (provider == (int)AICLI_WEB_PROVIDER_GOOGLE_CSE) {
 		if (!cfg->google_api_key || !cfg->google_api_key[0] || !cfg->google_cse_cx || !cfg->google_cse_cx[0]) {
 			out->tool.stderr_text =
-			    "google_cse is not configured: set GOOGLE_API_KEY and GOOGLE_CSE_CX (or use AICLI_SEARCH_PROVIDER=brave)";
+			    "google_cse is not configured. Set GOOGLE_API_KEY and GOOGLE_CSE_CX, or use AICLI_SEARCH_PROVIDER=brave with BRAVE_API_KEY. "
+			    "Hint for tool-using models: call cli_help(topic=\"web search\") to show the exact CLI/env help text.";
 			out->tool.exit_code = 2;
 			free(key);
 			return 0;
@@ -248,7 +340,9 @@ int aicli_web_search_run(const aicli_config_t *cfg,
 		aicli_google_response_free(&res);
 	} else if (provider == (int)AICLI_WEB_PROVIDER_BRAVE) {
 		if (!cfg->brave_api_key || !cfg->brave_api_key[0]) {
-			out->tool.stderr_text = "brave is not configured: set BRAVE_API_KEY";
+			out->tool.stderr_text =
+			    "brave is not configured. Set BRAVE_API_KEY (and optionally AICLI_SEARCH_PROVIDER=brave). "
+			    "Hint for tool-using models: call cli_help(topic=\"web search\") to show the exact CLI/env help text.";
 			out->tool.exit_code = 2;
 			free(key);
 			return 0;
@@ -350,7 +444,9 @@ int aicli_web_fetch_run(const aicli_config_t *cfg,
 		return 0;
 	}
 	if (!req->allowed_prefixes || req->allowed_prefix_count == 0) {
-		out->tool.stderr_text = "web_fetch disabled: set AICLI_WEB_FETCH_PREFIXES to allow URL prefixes";
+		out->tool.stderr_text =
+		    "web_fetch disabled. Set AICLI_WEB_FETCH_PREFIXES to allow URL prefixes. "
+		    "Hint for tool-using models: call cli_help(topic=\"web fetch\") to show the exact CLI/env help text.";
 		out->tool.exit_code = 3;
 		return 0;
 	}
