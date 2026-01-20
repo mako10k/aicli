@@ -181,12 +181,12 @@ int aicli_execute_run_pipeline_from_file(const aicli_allowlist_t *allow,
 		size = AICLI_MAX_TOOL_BYTES;
 
 	// Step 1: read whole file (bounded) into memory for now.
-	// Limit: avoid reading huge files in MVP.
+	// Limit: avoid reading huge files (bounded for now).
 	size_t file_total = 0;
 	char *file_buf = NULL;
 	size_t file_len = 0;
 	{
-		size_t max_read = 1024 * 1024; // 1 MiB MVP limit
+		size_t max_read = 1024 * 1024; // 1 MiB hard limit
 		if (aicli_read_file_range(rp, 0, max_read, &file_buf, &file_len, &file_total) != 0) {
 			free(rp);
 			out->stderr_text = strerror(errno);

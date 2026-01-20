@@ -268,7 +268,7 @@ static size_t detect_tty_width_or_default(size_t fallback)
 
 static int cmd_exec_local(int argc, char **argv)
 {
-	// Internal helper for MVP testing:
+	// Internal helper for execute testing:
 	// aicli _exec [--file PATH ...] [--file - | --stdin] [--start N] [--size N] "CMD"
 	// Notes:
 	//  - Multiple files: repeat --file (e.g. --file A --file B). "--file A B" is NOT supported.
@@ -456,6 +456,8 @@ static int cmd_exec_local(int argc, char **argv)
 
 	aicli_tool_result_t res;
 	aicli_execute_run(&allow, &req, &res);
+	// For execute: keep errors on stderr, but also allow tools to return
+	// error text via stdout (e.g., grep: <regex error>) while failing.
 	if (res.stderr_text && res.stderr_text[0])
 		fprintf(stderr, "%s\n", res.stderr_text);
 	if (res.stdout_text)

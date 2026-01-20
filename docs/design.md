@@ -88,7 +88,7 @@ execute({
 - `start/size` によりページング（byte単位）。`size` 既定4096。
 - `idempotency` が指定された場合、同一要求はキャッシュ利用可。
 
-### 許可コマンド（MVP）
+### 許可コマンド
 - `cat <FILE>`: byte range 読取対応（start/sizeに従って返す）
 - `nl`: 行番号付与
 - `head -n N` / `tail -n N`

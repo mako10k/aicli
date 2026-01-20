@@ -4,7 +4,7 @@
 
 typedef struct {
 	const char *model;       // required
-	const char *input_text;  // required (single-turn for MVP)
+	const char *input_text;  // required (single-turn)
 	const char *system_text; // optional
 } aicli_openai_request_t;
 

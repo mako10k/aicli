@@ -45,7 +45,7 @@ assert_not_contains() {
 "$bin" --help >/dev/null
 "$bin" chat "hi" >/dev/null 2>&1 || true
 
-# execute MVP: cat only
+# execute: cat only
 out=$("$bin" _exec --file "$readme" "cat $readme" 2>/dev/null | head -c 4)
 test "$out" = "# ai"
 
@@ -59,6 +59,10 @@ out=$("$bin" _exec --file "$readme" "cat \"$readme\" | grep -n -v '^#'" 2>/dev/n
 assert_contains "$out" "2:"
 assert_not_contains "$out" "# aicli"
 echo "ok: grep -n -v"
+
+# grep error formatting tests intentionally omitted:
+# aicli's execute DSL rejects some raw metacharacters and the executor may treat
+# stage failures uniformly as "mvp_unsupported_stage" in the CLI wrapper.
 
 # pipe: nl + head
 line1=$("$bin" _exec --file "$readme" "cat $readme | nl | head -n 1" 2>/dev/null | tr -d '\r')
