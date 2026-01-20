@@ -125,8 +125,8 @@ static const char *pick_runtime_dir(void) {
 }
 
 int aicli_continue_state_path(char *out_path, size_t out_cap,
-                             long pid,
-                             const aicli_continue_opt_t *opt) {
+			     long sid,
+			     const aicli_continue_opt_t *opt) {
 	if (out_path == NULL || out_cap == 0) return -1;
 	const char *base = pick_runtime_dir();
 
@@ -136,14 +136,15 @@ int aicli_continue_state_path(char *out_path, size_t out_cap,
 		return -1;
 	}
 
+	// Use session id (getsid) to allow continuity across separate invocations.
+	// Optional THREAD suffix allows multiple independent conversations.
 	if (opt && opt->has_thread) {
-		return snprintf(out_path, out_cap, "%s/.previous_response_id_%ld_%s",
-		                dir, pid, opt->thread_name) < (int)out_cap
+		return snprintf(out_path, out_cap, "%s/.previous_response_id_s%ld_%s", dir,
+		                sid, opt->thread_name) < (int)out_cap
 		           ? 0
 		           : -1;
 	}
-	return snprintf(out_path, out_cap, "%s/.previous_response_id_%ld", dir, pid) <
-	           (int)out_cap
+	return snprintf(out_path, out_cap, "%s/.previous_response_id_s%ld", dir, sid) < (int)out_cap
 	           ? 0
 	           : -1;
 }

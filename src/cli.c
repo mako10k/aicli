@@ -503,7 +503,7 @@ static void usage(FILE *out)
 	        "  5) .aicli.json in $HOME\n"
 			"\n"
 			"Continue:\n"
-			"  --continue saves the last OpenAI response id (response.id) to a per-run state file\n"
+			"  --continue saves the last OpenAI response id (response.id) to a state file keyed by getsid(0)\n"
 			"  and uses it as previous_response_id on the next run (session continuity).\n"
 	        "\n"
 	        "Environment:\n"
@@ -947,7 +947,12 @@ static int cmd_run(int argc, char **argv, const aicli_config_t *cfg)
 
 	const char *previous_response_id = NULL;
 	if (want_continue) {
-		if (aicli_continue_state_path(state_path, sizeof(state_path), (long)getpid(), &cont) != 0) {
+		long sid = (long)getsid(0);
+		if (sid <= 0) {
+			fprintf(stderr, "failed to get session id for --continue\n");
+			return 2;
+		}
+		if (aicli_continue_state_path(state_path, sizeof(state_path), sid, &cont) != 0) {
 			fprintf(stderr, "failed to compute --continue state path\n");
 			return 2;
 		}

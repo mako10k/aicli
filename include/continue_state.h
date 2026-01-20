@@ -31,7 +31,7 @@ int aicli_continue_parse(const char *optarg, aicli_continue_opt_t *out);
 // Directory is chosen by: $XDG_RUNTIME_DIR/aicli, else $TMPDIR/aicli, else /tmp/aicli.
 // File name base: .previous_response_id_${pid}[ _${thread}]
 int aicli_continue_state_path(char *out_path, size_t out_cap,
-                             long pid,
+			     long sid,
                              const aicli_continue_opt_t *opt);
 
 // Read previous_response_id from state file.
