@@ -88,6 +88,7 @@ export GOOGLE_CSE_CX=...
 
 ## ドキュメント
 - 設計: `docs/design.md`
+- `execute` 詳細: `docs/execute.md`
 
 ## 注意
 - `execute` は read-only。ファイル変更/外部コマンド実行/リダイレクトは禁止。
