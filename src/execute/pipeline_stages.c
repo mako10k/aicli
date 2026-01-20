@@ -96,7 +96,7 @@ bool aicli_stage_tail(const char *in, size_t in_len, size_t nlines, aicli_buf_t 
 
 bool aicli_stage_wc(const char *in, size_t in_len, char mode, aicli_buf_t *out)
 {
-	// mode: 'l' or 'c'
+	// mode: 'l' (lines) or 'c' (bytes) or 'w' (words)
 	unsigned long long v = 0;
 	if (mode == 'c') {
 		v = (unsigned long long)in_len;
@@ -104,6 +104,19 @@ bool aicli_stage_wc(const char *in, size_t in_len, char mode, aicli_buf_t *out)
 		for (size_t i = 0; i < in_len; i++)
 			if (in[i] == '\n')
 				v++;
+	} else if (mode == 'w') {
+		// POSIX-ish word count: transitions from whitespace to non-whitespace.
+		bool in_word = false;
+		for (size_t i = 0; i < in_len; i++) {
+			unsigned char ch = (unsigned char)in[i];
+			bool ws = (ch == ' ' || ch == '\t' || ch == '\n' || ch == '\r' || ch == '\v' || ch == '\f');
+			if (ws) {
+				in_word = false;
+			} else if (!in_word) {
+				v++;
+				in_word = true;
+			}
+		}
 	} else {
 		return false;
 	}
@@ -389,7 +402,7 @@ size_t aicli_parse_tail_n(const aicli_dsl_stage_t *st, bool *ok)
 
 bool aicli_parse_wc_mode(const aicli_dsl_stage_t *st, char *out_mode)
 {
-	// wc -l | wc -c
+	// wc -l | wc -c | wc -w
 	const char *a[8];
 	int ac = 0;
 	aicli_dsl_strip_double_dash(st, a, &ac);
@@ -401,6 +414,10 @@ bool aicli_parse_wc_mode(const aicli_dsl_stage_t *st, char *out_mode)
 	}
 	if (strcmp(a[1], "-c") == 0) {
 		*out_mode = 'c';
+		return true;
+	}
+	if (strcmp(a[1], "-w") == 0) {
+		*out_mode = 'w';
 		return true;
 	}
 	return false;
@@ -425,7 +442,7 @@ bool aicli_parse_sort_reverse(const aicli_dsl_stage_t *st, bool *out_reverse)
 
 bool aicli_parse_grep_args(const aicli_dsl_stage_t *st, const char **out_pattern, bool *out_n)
 {
-	// grep PATTERN | grep -n PATTERN
+	// grep PATTERN | grep -n PATTERN | grep -F PATTERN | grep -n -F PATTERN
 	const char *a[8];
 	int ac = 0;
 	aicli_dsl_strip_double_dash(st, a, &ac);
@@ -438,6 +455,31 @@ bool aicli_parse_grep_args(const aicli_dsl_stage_t *st, const char **out_pattern
 		*out_n = true;
 		*out_pattern = a[2];
 		return true;
+	}
+	if (ac == 3 && strcmp(a[1], "-F") == 0) {
+		*out_n = false;
+		*out_pattern = a[2];
+		return true;
+	}
+	if (ac == 4) {
+		bool n = false;
+		int opt_cnt = 0;
+		for (int i = 1; i <= 2; i++) {
+			if (strcmp(a[i], "-n") == 0) {
+				n = true;
+				opt_cnt++;
+				continue;
+			}
+			if (strcmp(a[i], "-F") == 0) {
+				opt_cnt++;
+				continue;
+			}
+		}
+		if (opt_cnt == 2) {
+			*out_n = n;
+			*out_pattern = a[3];
+			return true;
+		}
 	}
 	return false;
 }

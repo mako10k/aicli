@@ -82,7 +82,7 @@ DSL 内で許可されるコマンド（`aicli_cmd_kind_t`）は次の通りで�
 
 ### `nl`
 
-- 形式: `nl`
+- 形式: `nl` または `nl -ba`
 - 役割: 行番号付与（`%6lu\t` 形式）
 
 ### `head`
@@ -97,9 +97,10 @@ DSL 内で許可されるコマンド（`aicli_cmd_kind_t`）は次の通りで�
 
 ### `wc`
 
-- 形式: `wc -l` または `wc -c`
+- 形式: `wc -l` / `wc -c` / `wc -w`
 - `-l`: 改行数
 - `-c`: バイト数（入力長）
+- `-w`: 単語数（空白類で区切る簡易実装）
 
 ### `sort`
 
@@ -109,9 +110,10 @@ DSL 内で許可されるコマンド（`aicli_cmd_kind_t`）は次の通りで�
 
 ### `grep`
 
-- 形式: `grep PATTERN` または `grep -n PATTERN`
+- 形式: `grep PATTERN` / `grep -n PATTERN` / `grep -F PATTERN` / `grep -n -F PATTERN`
 - マッチ: **固定文字列**（正規表現ではない、`memcmp` の部分一致）
 - `-n`: `line_no:` プレフィクスを付与
+- `-F`: 固定文字列（実装上は常に固定文字列なので、互換のため受理）
 
 ### `sed`
 

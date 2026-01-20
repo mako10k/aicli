@@ -23,6 +23,10 @@ test "$out" = "# ai"
 line1=$("$bin" _exec --file ../README.md "cat ../README.md | nl | head -n 1" 2>/dev/null | tr -d '\r')
 echo "$line1" | grep -q $'^\s*1\t# aicli'
 
+# pipe: nl -ba (compat)
+line1b=$("$bin" _exec --file ../README.md "cat ../README.md | nl -ba | head -n 1" 2>/dev/null | tr -d '\r')
+echo "$line1b" | grep -q $'^\s*1\t# aicli'
+
 # pipe: tail
 last=$("$bin" _exec --file ../README.md "cat ../README.md | tail -n 1" 2>/dev/null)
 test -n "$last"
@@ -39,6 +43,9 @@ g1=$("$bin" _exec --file tmp/grep.txt "cat tmp/grep.txt | grep foo" 2>/dev/null 
 test "$g1" = $'foo\nfoo bar'
 g2=$("$bin" _exec --file tmp/grep.txt "cat tmp/grep.txt | grep -n bar" 2>/dev/null | tr -d '\r')
 test "$g2" = $'2:bar\n3:foo bar'
+
+g3=$("$bin" _exec --file tmp/grep.txt "cat tmp/grep.txt | grep -F 'foo bar'" 2>/dev/null | tr -d '\r')
+test "$g3" = $'foo bar'
 
 # dsl: backslash escapes + double quotes
 printf "hello world\n" > tmp/esc.txt
@@ -79,6 +86,9 @@ echo "$bytes" | grep -qE '^[0-9]+$'
 
 lines=$("$bin" _exec --file ../README.md "cat ../README.md | wc -l" 2>/dev/null | tr -d '\n')
 echo "$lines" | grep -qE '^[0-9]+$'
+
+words=$("$bin" _exec --file ../README.md "cat ../README.md | wc -w" 2>/dev/null | tr -d '\n')
+echo "$words" | grep -qE '^[0-9]+$'
 
 # stdin: explicit --stdin and implicit (no --file)
 stdin1=$(printf "z\ny\n" | "$bin" _exec --stdin "cat - | head -n 1" 2>/dev/null | tr -d '\r')

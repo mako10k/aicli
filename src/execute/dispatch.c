@@ -2,6 +2,8 @@
 
 #include "execute/pipeline_stages.h"
 
+#include <string.h>
+
 typedef bool (*aicli_stage_apply_fn)(const aicli_dsl_stage_t *stg, const char *in, size_t in_len,
                                     aicli_buf_t *out);
 
@@ -12,7 +14,11 @@ typedef struct aicli_stage_dispatch {
 
 static bool apply_nl(const aicli_dsl_stage_t *stg, const char *in, size_t in_len, aicli_buf_t *out)
 {
-	(void)stg;
+	// Accept minimal compatibility flags like: nl -ba
+	if (stg && stg->argc > 1) {
+		if (!(stg->argc == 2 && strcmp(stg->argv[1], "-ba") == 0))
+			return false;
+	}
 	return aicli_stage_nl(in, in_len, out);
 }
 
