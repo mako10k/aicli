@@ -68,7 +68,6 @@ static bool apply_grep(const aicli_dsl_stage_t *stg, const char *in, size_t in_l
 
 static bool apply_sed(const aicli_dsl_stage_t *stg, const char *in, size_t in_len, aicli_buf_t *out)
 {
-	const char *dbg = getenv("AICLI_DEBUG_EXEC_DSL");
 	// Prefer sed -n address scripts, then substitution scripts.
 	char cmd = 0;
 	const char *re1 = NULL;
@@ -76,8 +75,6 @@ static bool apply_sed(const aicli_dsl_stage_t *stg, const char *in, size_t in_le
 	const char *re2 = NULL;
 	size_t re2_len = 0;
 	if (aicli_parse_sed_re_args(stg, &re1, &re1_len, &re2, &re2_len, &cmd)) {
-		if (dbg && dbg[0] != '\0')
-			fprintf(stderr, "[dsl] sed: re-addr matched (cmd=%c)\n", cmd);
 		return aicli_stage_sed_n_re_addr(in, in_len, re1, re1_len, re2, re2_len, cmd, out);
 	}
 
@@ -85,8 +82,6 @@ static bool apply_sed(const aicli_dsl_stage_t *stg, const char *in, size_t in_le
 	size_t end_addr = 0;
 	cmd = 0;
 	if (aicli_parse_sed_args(stg, &start_addr, &end_addr, &cmd)) {
-		if (dbg && dbg[0] != '\0')
-			fprintf(stderr, "[dsl] sed: num-addr matched (cmd=%c)\n", cmd);
 		return aicli_stage_sed_n_addr(in, in_len, start_addr, end_addr, cmd, out);
 	}
 
@@ -95,12 +90,8 @@ static bool apply_sed(const aicli_dsl_stage_t *stg, const char *in, size_t in_le
 	bool global = false;
 	bool print_on_match = false;
 	if (!aicli_parse_sed_subst_args(stg, &pattern, &repl, &global, &print_on_match)) {
-		if (dbg && dbg[0] != '\0')
-			fprintf(stderr, "[dsl] sed: no parser matched\n");
 		return false;
 	}
-	if (dbg && dbg[0] != '\0')
-		fprintf(stderr, "[dsl] sed: subst matched (g=%d p=%d)\n", (int)global, (int)print_on_match);
 	return aicli_stage_sed_n_subst(in, in_len, pattern, repl, global, print_on_match, out);
 }
 

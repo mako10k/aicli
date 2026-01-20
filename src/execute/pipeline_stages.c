@@ -5,8 +5,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <unistd.h> // For getenv
-#include <stdio.h>  // For fprintf
 
 static void aicli_dsl_strip_double_dash(const aicli_dsl_stage_t *st, const char *argv_out[8],
 				       int *argc_out)
@@ -457,30 +455,18 @@ static bool parse_sed_re_script(const char *script, const char **out_re1, size_t
 	// Delimiter is fixed to '/'.
 	if (!script || !*script)
 		return false;
-	const char *dbg = getenv("AICLI_DEBUG_EXEC_DSL");
-	if (dbg && dbg[0] != '\0')
-		fprintf(stderr, "[dsl] parse_sed_re_script: script=%s\n", script);
-
 	const char *re1 = NULL;
 	size_t re1_len = 0;
 	const char *p = NULL;
 	if (!parse_sed_re_addr(script, &re1, &re1_len, &p)) {
-		if (dbg && dbg[0] != '\0')
-			fprintf(stderr, "[dsl] parse_sed_re_script: addr1 failed\n");
 		return false;
 	}
-	if (dbg && dbg[0] != '\0')
-		fprintf(stderr, "[dsl] parse_sed_re_script: after addr1 p[0]=%c\n", p && p[0] ? p[0] : '0');
 	// p points at the closing '/' delimiter.
 	if (p[0] != '/') {
 		free((void *)re1);
-		if (dbg && dbg[0] != '\0')
-			fprintf(stderr, "[dsl] parse_sed_re_script: expected closing '/' after addr1\n");
 		return false;
 	}
 	p++; // move to either ',' (range) or 'p'/'d'
-	if (dbg && dbg[0] != '\0')
-		fprintf(stderr, "[dsl] parse_sed_re_script: after delim p[0]=%c\n", p && p[0] ? p[0] : '0');
 
 	const char *re2 = NULL;
 	size_t re2_len = 0;
@@ -488,23 +474,16 @@ static bool parse_sed_re_script(const char *script, const char **out_re1, size_t
 		p++;
 		if (!parse_sed_re_addr(p, &re2, &re2_len, &p)) {
 			free((void *)re1);
-			if (dbg && dbg[0] != '\0')
-				fprintf(stderr, "[dsl] parse_sed_re_script: addr2 failed\n");
 			return false;
 		}
 		// p points at the closing '/' delimiter of the second address.
 		if (p[0] != '/') {
 			free((void *)re1);
 			free((void *)re2);
-			if (dbg && dbg[0] != '\0')
-				fprintf(stderr, "[dsl] parse_sed_re_script: expected closing '/' after addr2\n");
 			return false;
 		}
 		p++; // move to 'p'/'d'
 	}
-	if (dbg && dbg[0] != '\0')
-		fprintf(stderr, "[dsl] parse_sed_re_script: cmd char p[0]=%c next=%c\n",
-		        p && p[0] ? p[0] : '0', p && p[1] ? p[1] : '0');
 
 	if (p[0] != 'p' && p[0] != 'd') {
 		free((void *)re1);

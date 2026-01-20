@@ -13,20 +13,6 @@
 #include <stdlib.h>
 #include <string.h>
 
-static void dbg_print_stage(const aicli_dsl_stage_t *st)
-{
-	if (!st)
-		return;
-	const char *dbg = getenv("AICLI_DEBUG_EXEC_DSL");
-	if (!dbg || dbg[0] == '\0')
-		return;
-	fprintf(stderr, "[dsl] kind=%d argc=%d\n", (int)st->kind, st->argc);
-	for (int i = 0; i < st->argc; i++) {
-		const char *a = st->argv[i] ? st->argv[i] : "(null)";
-		fprintf(stderr, "[dsl] argv[%d]=%s\n", i, a);
-	}
-}
-
 static bool stage_has_file_arg(aicli_cmd_kind_t kind)
 {
 	// Commands that can take a source FILE as their last argument.
@@ -233,7 +219,6 @@ int aicli_execute_run_pipeline_from_file(const aicli_allowlist_t *allow,
 		bool ok = aicli_execute_apply_stage(stg, cur, cur_len, &tmp1);
 
 		if (!ok) {
-			dbg_print_stage(stg);
 			aicli_buf_free(&tmp1);
 			aicli_buf_free(&tmp2);
 			free(file_buf);
