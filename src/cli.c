@@ -511,6 +511,7 @@ const char *aicli_cli_usage_string(void)
 	       "  and uses it as previous_response_id on the next run (session continuity).\n"
 	       "\n"
 	       "Environment:\n"
+	       "  OPENAI_API_KEY=... (or AICLI_OPENAI_API_KEY)\n"
 	       "  AICLI_SEARCH_PROVIDER=google_cse|google|brave (default: google_cse)\n"
 	       "  AICLI_WEB_FETCH_PREFIXES=prefix1,prefix2,... (enables web fetch allowlist)\n"
 	       "  GOOGLE_API_KEY=...\n"
@@ -525,6 +526,8 @@ static void config_apply_env_overrides(aicli_config_t *cfg)
 	const char *v;
 
 	v = getenv("OPENAI_API_KEY");
+	if ((!v || !v[0]))
+		v = getenv("AICLI_OPENAI_API_KEY");
 	if (v && v[0])
 		cfg->openai_api_key = v;
 	v = getenv("OPENAI_BASE_URL");
@@ -608,6 +611,14 @@ static bool load_config_with_precedence(aicli_config_t *cfg, int argc, char **ar
 	}
 
 	if (found) {
+		if (!aicli_config_file_is_secure(&cf)) {
+			fprintf(stderr,
+			        "insecure config file permissions: %s\n"
+			        "Fix with: chmod 600 %s\n",
+			        cf.path ? cf.path : "(null)", cf.path ? cf.path : "(null)");
+			aicli_config_file_free(&cf);
+			return false;
+		}
 		// Apply file values, then re-apply env overrides to keep precedence env > file.
 		(void)aicli_config_load_from_file(cfg, &cf);
 		aicli_config_file_free(&cf);
@@ -750,7 +761,7 @@ static int cmd_run(int argc, char **argv, const aicli_config_t *cfg)
 	// aicli run [--file PATH ...] [--file - | --stdin]
 	//          [--turns N] [--max-tool-calls N] [--tool-threads N] [--auto-search] <prompt>
 	if (!cfg || !cfg->openai_api_key || !cfg->openai_api_key[0]) {
-		fprintf(stderr, "OPENAI_API_KEY is required\n");
+		fprintf(stderr, "OPENAI_API_KEY (or AICLI_OPENAI_API_KEY, or config openai_api_key) is required\n");
 		return 2;
 	}
 

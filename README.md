@@ -32,6 +32,7 @@ make
 
 ```bash
 export OPENAI_API_KEY=... 
+export AICLI_OPENAI_API_KEY=... # (代替) OPENAI_API_KEY の代わりに使える
 export AICLI_MODEL=gpt-4.1-mini
 ./src/aicli chat "hello"
 ```
@@ -57,6 +58,7 @@ export AICLI_MODEL=gpt-4.1-mini
 
 ```json
 {
+	"openai_api_key": "...",
 	"model": "gpt-5-mini",
 	"openai_base_url": "https://api.openai.com",
 	"search_provider": "google_cse",

@@ -23,6 +23,12 @@ bool aicli_config_file_find(aicli_config_file_t *out);
 
 void aicli_config_file_free(aicli_config_file_t *cf);
 
+// Returns true if config file is safe to read:
+//  - regular file
+//  - owned by current user
+//  - no group/other permissions (no secrets leakage)
+bool aicli_config_file_is_secure(const aicli_config_file_t *cf);
+
 // Loads config values from a JSON file and applies them onto `cfg`.
 // Only known keys are applied; unknown keys are ignored.
 bool aicli_config_load_from_file(aicli_config_t *cfg, const aicli_config_file_t *cf);

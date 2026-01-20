@@ -48,6 +48,8 @@
 優先順位: CLI引数 > 環境変数 > デフォルト
 
 - `OPENAI_API_KEY`（必須）
+  - 代替: `AICLI_OPENAI_API_KEY`
+  - 代替: 設定ファイル `.aicli.json` の `openai_api_key`
 - `OPENAI_BASE_URL`（任意）既定: `https://api.openai.com/v1`
 - `AICLI_MODEL`（任意）既定: `gpt-4.1-mini`（例）
 

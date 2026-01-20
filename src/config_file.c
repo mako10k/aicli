@@ -4,6 +4,8 @@
 
 #include <errno.h>
 #include <limits.h>
+#include <sys/stat.h>
+#include <sys/types.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -77,6 +79,31 @@ static bool file_exists(const char *path)
 	return access(path, R_OK) == 0;
 }
 
+static bool is_secure_config_path(const char *path)
+{
+	if (!path || !path[0])
+		return false;
+	struct stat st;
+	if (stat(path, &st) != 0)
+		return false;
+	if (!S_ISREG(st.st_mode))
+		return false;
+	uid_t uid = getuid();
+	if (st.st_uid != uid)
+		return false;
+	// Disallow any group/other access (read/write/exec) to avoid leaking secrets.
+	if ((st.st_mode & (S_IRWXG | S_IRWXO)) != 0)
+		return false;
+	return true;
+}
+
+bool aicli_config_file_is_secure(const aicli_config_file_t *cf)
+{
+	if (!cf || !cf->path)
+		return false;
+	return is_secure_config_path(cf->path);
+}
+
 static bool find_in_dir(aicli_config_file_t *out, const char *dir)
 {
 	char *cand = join_path2(dir, AICLI_DEFAULT_CONFIG_FILENAME);
@@ -90,6 +117,10 @@ static bool find_in_dir(aicli_config_file_t *out, const char *dir)
 	free(cand);
 	if (!rp)
 		return false;
+	if (!is_secure_config_path(rp)) {
+		free(rp);
+		return false;
+	}
 	out->path = rp;
 	out->dir = dirname_dup(rp);
 	if (!out->dir) {
@@ -215,6 +246,7 @@ bool aicli_config_load_from_file(aicli_config_t *cfg, const aicli_config_file_t 
 	// future config_free().
 
 	const char *tmp_model = NULL;
+	const char *tmp_openai_key = NULL;
 	const char *tmp_base = NULL;
 	const char *tmp_google_key = NULL;
 	const char *tmp_google_cx = NULL;
@@ -222,12 +254,20 @@ bool aicli_config_load_from_file(aicli_config_t *cfg, const aicli_config_file_t 
 	const char *tmp_provider = NULL;
 
 	apply_str_if_present(&tmp_model, root, "model");
+	apply_str_if_present(&tmp_openai_key, root, "openai_api_key");
 	apply_str_if_present(&tmp_base, root, "openai_base_url");
 	apply_str_if_present(&tmp_provider, root, "search_provider");
 	apply_str_if_present(&tmp_google_key, root, "google_api_key");
 	apply_str_if_present(&tmp_google_cx, root, "google_cse_cx");
 	apply_str_if_present(&tmp_brave_key, root, "brave_api_key");
 
+	if (tmp_openai_key)
+	{
+		if (cfg->openai_api_key_owned)
+			free((void *)cfg->openai_api_key);
+		cfg->openai_api_key = dup_cstr(tmp_openai_key);
+		cfg->openai_api_key_owned = (cfg->openai_api_key != NULL);
+	}
 	if (tmp_model)
 	{
 		if (cfg->model_owned)

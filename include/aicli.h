@@ -15,6 +15,7 @@ typedef struct {
 	const char *openai_base_url;
 	const char *model;
 	bool openai_base_url_owned;
+	bool openai_api_key_owned;
 	bool model_owned;
 	int debug_api;
 	int debug_function_call;

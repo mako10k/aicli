@@ -9,6 +9,8 @@ void aicli_config_free(aicli_config_t *cfg)
 	if (!cfg)
 		return;
 	// Only free heap-owned strings.
+	if (cfg->openai_api_key_owned)
+		free((void *)cfg->openai_api_key);
 	if (cfg->openai_base_url_owned)
 		free((void *)cfg->openai_base_url);
 	if (cfg->model_owned)
@@ -26,7 +28,12 @@ bool aicli_config_load_from_env(aicli_config_t *out)
 {
 	if (!out)
 		return false;
-	out->openai_api_key = getenv("OPENAI_API_KEY");
+	// Prefer OPENAI_API_KEY for backward compatibility.
+	const char *k = getenv("OPENAI_API_KEY");
+	if (!k || !k[0])
+		k = getenv("AICLI_OPENAI_API_KEY");
+	out->openai_api_key = k;
+	out->openai_api_key_owned = false;
 	out->openai_base_url = getenv("OPENAI_BASE_URL");
 	out->openai_base_url_owned = false;
 	out->model = getenv("AICLI_MODEL");
