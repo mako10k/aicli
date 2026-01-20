@@ -6,6 +6,8 @@ if [[ -x "${AICLI_BIN:-}" ]]; then
 	bin="$AICLI_BIN"
 elif [[ -x "../src/aicli" ]]; then
 	bin="$PWD/../src/aicli"
+elif [[ -x "./src/aicli" ]]; then
+	bin="$PWD/src/aicli"
 else
 	echo "aicli binary not found" >&2
 	exit 127
@@ -79,6 +81,17 @@ s3=$("$bin" _exec --file tmp/sed.txt "cat tmp/sed.txt | sed -n '2,3p'" 2>/dev/nu
 test "$s3" = $'l2\nl3'
 s4=$("$bin" _exec --file tmp/sed.txt "cat tmp/sed.txt | sed -n '2,3d'" 2>/dev/null | tr -d '\r')
 test "$s4" = $'l1'
+
+# pipe: sed (regex substitution; BRE via regex.h)
+printf "foo\nbar\nfoo bar\n" > tmp/sed_subst.txt
+
+# only prints substituted lines on 'p' (because -n)
+sp1=$("$bin" _exec --file tmp/sed_subst.txt "cat tmp/sed_subst.txt | sed -n 's/foo/ZZ/p'" 2>/dev/null | tr -d '\r')
+test "$sp1" = $'ZZ\nZZ bar'
+
+# global replacement + print-on-match
+sp2=$("$bin" _exec --file tmp/sed_subst.txt "cat tmp/sed_subst.txt | sed -n 's/o/O/gp'" 2>/dev/null | tr -d '\r')
+test "$sp2" = $'fOO\nfOO bar'
 
 # pipe: wc
 bytes=$("$bin" _exec --file ../README.md "cat ../README.md | wc -c" 2>/dev/null | tr -d '\n')

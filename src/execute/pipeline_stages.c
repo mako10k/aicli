@@ -1,6 +1,7 @@
 #include "execute/pipeline_stages.h"
 
 #include <stdbool.h>
+#include <regex.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -495,4 +496,299 @@ bool aicli_parse_sed_args(const aicli_dsl_stage_t *st, size_t *out_start, size_t
 	if (strcmp(a[1], "-n") != 0)
 		return false;
 	return parse_sed_n_script(a[2], out_start, out_end, out_cmd);
+}
+
+static bool parse_sed_subst_script(const char *script, const char **out_pat, size_t *out_pat_len,
+				 const char **out_repl, size_t *out_repl_len,
+				 bool *out_global, bool *out_print_on_match)
+{
+	// Accept only:
+	//   s/RE/REPL/
+	//   s/RE/REPL/g
+	//   s/RE/REPL/p
+	//   s/RE/REPL/gp
+	// Delimiter is fixed to '/'. No backrefs supported in REPL.
+	if (!script || !*script)
+		return false;
+	if (script[0] != 's' || script[1] != '/')
+		return false;
+	const char *p = script + 2;
+	const char *re_end = strchr(p, '/');
+	if (!re_end || re_end == p)
+		return false;
+	const char *repl = re_end + 1;
+	const char *repl_end = strchr(repl, '/');
+	if (!repl_end)
+		return false;
+
+	size_t pat_len = (size_t)(re_end - p);
+	size_t repl_len = (size_t)(repl_end - repl);
+
+	bool g = false;
+	bool pr = false;
+	for (const char *f = repl_end + 1; *f; f++) {
+		if (*f == 'g') {
+			g = true;
+			continue;
+		}
+		if (*f == 'p') {
+			pr = true;
+			continue;
+		}
+		return false;
+	}
+
+	*out_pat = p;
+	*out_pat_len = pat_len;
+	*out_repl = repl;
+	*out_repl_len = repl_len;
+	*out_global = g;
+	*out_print_on_match = pr;
+	return true;
+}
+
+bool aicli_parse_sed_subst_args(const aicli_dsl_stage_t *st, const char **out_pattern,
+				 const char **out_repl, bool *out_global,
+				 bool *out_print_on_match)
+{
+	// sed -n 's/RE/REPL/[gp]'
+	const char *a[8];
+	int ac = 0;
+	aicli_dsl_strip_double_dash(st, a, &ac);
+	if (ac != 3)
+		return false;
+	if (strcmp(a[1], "-n") != 0)
+		return false;
+	const char *pat = NULL;
+	size_t pat_len = 0;
+	const char *rep = NULL;
+	size_t rep_len = 0;
+	if (!parse_sed_subst_script(a[2], &pat, &pat_len, &rep, &rep_len, out_global, out_print_on_match))
+		return false;
+	// Copy out NUL-terminated strings for later use in stage execution.
+	char *pat_z = (char *)malloc(pat_len + 1);
+	char *rep_z = (char *)malloc(rep_len + 1);
+	if (!pat_z || !rep_z) {
+		free(pat_z);
+		free(rep_z);
+		return false;
+	}
+	memcpy(pat_z, pat, pat_len);
+	pat_z[pat_len] = '\0';
+	memcpy(rep_z, rep, rep_len);
+	rep_z[rep_len] = '\0';
+	*out_pattern = pat_z;
+	*out_repl = rep_z;
+	return true;
+}
+
+bool aicli_stage_sed_n_subst(const char *in, size_t in_len, const char *pattern, const char *repl,
+			     bool global, bool print_on_match, aicli_buf_t *out)
+{
+	if (!in || !pattern || !repl || !out)
+		return false;
+	const char *dbg = getenv("AICLI_DEBUG_FUNCTION_CALL");
+	// `pattern` and `repl` are already NUL-terminated (allocated) by the parser.
+	const char *pat = pattern;
+	const char *rep = repl;
+	size_t repl_len = strlen(rep);
+
+	// Compile BRE (REG_EXTENDED not set). We need match offsets, so do NOT use REG_NOSUB.
+	regex_t rx;
+	memset(&rx, 0, sizeof(rx));
+	int rc = regcomp(&rx, pat, 0);
+	if (rc != 0) {
+		char errbuf[256];
+		regerror(rc, &rx, errbuf, sizeof(errbuf));
+		aicli_buf_append(out, "sed: ", 5);
+		aicli_buf_append(out, errbuf, strlen(errbuf));
+		aicli_buf_append(out, "\n", 1);
+		regfree(&rx);
+		free((void *)pattern);
+		free((void *)repl);
+		return false;
+	}
+
+
+	const size_t k_max_line_len = 64 * 1024;
+	const size_t k_max_out_bytes_per_line = 256 * 1024;
+	const size_t k_max_subst_per_line = 4096;
+
+	size_t i = 0;
+	size_t line_start = 0;
+	while (i <= in_len) {
+		if (i == in_len || in[i] == '\n') {
+			size_t line_len = i - line_start;
+			const char *line = in + line_start;
+			if (line_len > k_max_line_len) {
+				regfree(&rx);
+				free((void *)pattern);
+				free((void *)repl);
+				return false;
+			}
+
+			bool matched_any = false;
+			aicli_buf_t tmp;
+			if (!aicli_buf_init(&tmp, line_len + 32)) {
+				regfree(&rx);
+				free((void *)pattern);
+				free((void *)repl);
+				return false;
+			}
+			// Defensive: ensure empty output for this line.
+			tmp.len = 0;
+
+			size_t cursor = 0;
+			size_t subst_cnt = 0;
+			while (cursor <= line_len) {
+				size_t rem = line_len - cursor;
+				char *z = (char *)malloc(rem + 1);
+				if (!z) {
+					aicli_buf_free(&tmp);
+					regfree(&rx);
+					free((void *)pattern);
+					free((void *)repl);
+					return false;
+				}
+				memcpy(z, line + cursor, rem);
+				z[rem] = '\0';
+
+				regmatch_t m;
+				m.rm_so = -1;
+				m.rm_eo = -1;
+				int er = regexec(&rx, z, 1, &m, 0);
+				if (er == REG_NOMATCH) {
+					free(z);
+					break;
+				}
+				if (er != 0) {
+					char errbuf[256];
+					regerror(er, &rx, errbuf, sizeof(errbuf));
+					aicli_buf_append(out, "sed: ", 5);
+					aicli_buf_append(out, errbuf, strlen(errbuf));
+					aicli_buf_append(out, "\n", 1);
+					free(z);
+					aicli_buf_free(&tmp);
+					regfree(&rx);
+					free((void *)pattern);
+					free((void *)repl);
+					return false;
+				}
+				if (m.rm_so < 0 || m.rm_eo < 0) {
+					free(z);
+					break;
+				}
+				size_t so = (size_t)m.rm_so;
+				size_t eo = (size_t)m.rm_eo;
+				if (eo < so) {
+					free(z);
+					break;
+				}
+
+				matched_any = true;
+				subst_cnt++;
+				if (subst_cnt > k_max_subst_per_line) {
+					free(z);
+					aicli_buf_free(&tmp);
+					regfree(&rx);
+					free((void *)pattern);
+					free((void *)repl);
+					return false;
+				}
+
+				if (so > 0) {
+					if (!aicli_buf_append(&tmp, z, so)) {
+						free(z);
+						aicli_buf_free(&tmp);
+						regfree(&rx);
+						free((void *)pattern);
+						free((void *)repl);
+						return false;
+					}
+				}
+				if (!aicli_buf_append(&tmp, rep, repl_len)) {
+					free(z);
+					aicli_buf_free(&tmp);
+					regfree(&rx);
+					free((void *)pattern);
+					free((void *)repl);
+					return false;
+				}
+				if (tmp.len > k_max_out_bytes_per_line) {
+					free(z);
+					aicli_buf_free(&tmp);
+					regfree(&rx);
+					free((void *)pattern);
+					free((void *)repl);
+					return false;
+				}
+
+				cursor += eo;
+				free(z);
+				if (!global)
+					break;
+
+				if (eo == 0) {
+					if (cursor < line_len) {
+						if (!aicli_buf_append(&tmp, line + cursor, 1)) {
+							aicli_buf_free(&tmp);
+							regfree(&rx);
+							free((void *)pattern);
+							free((void *)repl);
+							return false;
+						}
+						cursor++;
+					} else {
+						break;
+					}
+				}
+			}
+
+			if (matched_any && cursor < line_len) {
+				if (!aicli_buf_append(&tmp, line + cursor, line_len - cursor)) {
+					aicli_buf_free(&tmp);
+					regfree(&rx);
+					free((void *)pattern);
+					free((void *)repl);
+					return false;
+				}
+			}
+
+			if (dbg && dbg[0] != '\0') {
+				fprintf(stderr,
+				        "[debug:sed] pat='%s' rep='%s' line_start=%zu line_len=%zu matched_any=%d global=%d p=%d tmp_len=%zu\n",
+				        pat, rep, line_start, line_len, matched_any ? 1 : 0, global ? 1 : 0,
+				        print_on_match ? 1 : 0, tmp.len);
+				if (matched_any) {
+					fprintf(stderr, "[debug:sed] line='%.*s'\n", (int)line_len, line);
+				}
+			}
+
+			if (print_on_match && matched_any) {
+				if (!aicli_buf_append(out, tmp.data, tmp.len)) {
+					aicli_buf_free(&tmp);
+					regfree(&rx);
+					free((void *)pattern);
+					free((void *)repl);
+					return false;
+				}
+				if (!aicli_buf_append(out, "\n", 1)) {
+					aicli_buf_free(&tmp);
+					regfree(&rx);
+					free((void *)pattern);
+					free((void *)repl);
+					return false;
+				}
+			}
+
+			aicli_buf_free(&tmp);
+			line_start = i + 1;
+		}
+		i++;
+	}
+
+	regfree(&rx);
+	free((void *)pattern);
+	free((void *)repl);
+	return true;
 }

@@ -197,15 +197,12 @@ int aicli_execute_run_pipeline_from_file(const aicli_allowlist_t *allow,
 			return 0;
 		}
 
-		tmp2.len = 0;
-		if (!aicli_buf_append(&tmp2, tmp1.data, tmp1.len)) {
-			aicli_buf_free(&tmp1);
-			aicli_buf_free(&tmp2);
-			free(file_buf);
-			out->stderr_text = "oom";
-			out->exit_code = 1;
-			return 0;
-		}
+
+		// Next stage should read the freshly-produced buffer. Swap the buffers
+		// to avoid tmp1/tmp2 aliasing issues (tmp2 may point to tmp1.data).
+		aicli_buf_t swap = tmp2;
+		tmp2 = tmp1;
+		tmp1 = swap;
 		cur = tmp2.data;
 		cur_len = tmp2.len;
 	}

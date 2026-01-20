@@ -4,6 +4,8 @@ AM_INIT_AUTOMAKE([-Wall -Werror foreign subdir-objects])
 AC_CONFIG_SRCDIR([src/main.c])
 AC_CONFIG_HEADERS([config.h])
 
+AC_USE_SYSTEM_EXTENSIONS
+
 AC_CONFIG_MACRO_DIR([m4])
 AC_PROG_CC
 
@@ -14,6 +16,11 @@ AX_PTHREAD
 
 # libcurl (required)
 PKG_CHECK_MODULES([CURL],[libcurl])
+
+# POSIX regex (for execute DSL advanced features)
+AC_CHECK_HEADERS([regex.h])
+AC_SEARCH_LIBS([regcomp], [regex], [], [])
+AC_CHECK_FUNCS([regcomp regexec regfree regerror])
 
 # vendored yyjson
 AC_MSG_NOTICE([checking for vendored yyjson... yes])

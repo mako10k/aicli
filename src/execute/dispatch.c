@@ -63,12 +63,20 @@ static bool apply_grep(const aicli_dsl_stage_t *stg, const char *in, size_t in_l
 
 static bool apply_sed(const aicli_dsl_stage_t *stg, const char *in, size_t in_len, aicli_buf_t *out)
 {
+	// Prefer sed -n address scripts, then substitution scripts.
 	size_t start_addr = 0;
 	size_t end_addr = 0;
 	char cmd = 0;
-	if (!aicli_parse_sed_args(stg, &start_addr, &end_addr, &cmd))
+	if (aicli_parse_sed_args(stg, &start_addr, &end_addr, &cmd))
+		return aicli_stage_sed_n_addr(in, in_len, start_addr, end_addr, cmd, out);
+
+	const char *pattern = NULL;
+	const char *repl = NULL;
+	bool global = false;
+	bool print_on_match = false;
+	if (!aicli_parse_sed_subst_args(stg, &pattern, &repl, &global, &print_on_match))
 		return false;
-	return aicli_stage_sed_n_addr(in, in_len, start_addr, end_addr, cmd, out);
+	return aicli_stage_sed_n_subst(in, in_len, pattern, repl, global, print_on_match, out);
 }
 
 static const aicli_stage_dispatch_t k_dispatch[] = {
