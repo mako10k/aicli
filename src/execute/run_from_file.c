@@ -5,12 +5,27 @@
 #include "execute/dispatch.h"
 #include "execute/file_reader.h"
 #include "execute/paging.h"
+#include "execute/pipeline_stages.h"
 
 #include <errno.h>
 #include <stdio.h>
 #include <stdbool.h>
 #include <stdlib.h>
 #include <string.h>
+
+static void dbg_print_stage(const aicli_dsl_stage_t *st)
+{
+	if (!st)
+		return;
+	const char *dbg = getenv("AICLI_DEBUG_EXEC_DSL");
+	if (!dbg || dbg[0] == '\0')
+		return;
+	fprintf(stderr, "[dsl] kind=%d argc=%d\n", (int)st->kind, st->argc);
+	for (int i = 0; i < st->argc; i++) {
+		const char *a = st->argv[i] ? st->argv[i] : "(null)";
+		fprintf(stderr, "[dsl] argv[%d]=%s\n", i, a);
+	}
+}
 
 static bool stage_has_file_arg(aicli_cmd_kind_t kind)
 {
@@ -31,6 +46,8 @@ static bool stage_is_file_sed_n_addr(const aicli_dsl_stage_t *st)
 {
 	// We only support a restricted sed form via pipeline stages:
 	//   sed -n '1,200p'   (script token only)
+	//   sed -n '/RE/p'    (script token only)
+	//   sed -n 's/RE/REPL/[gp]'
 	// When used as a file-input command, models often emit:
 	//   sed -n 1,200p FILE
 	// Normalize that shape into: cat FILE | sed -n 1,200p
@@ -47,6 +64,33 @@ static bool stage_is_file_sed_n_addr(const aicli_dsl_stage_t *st)
 		return false;
 	if (!st->argv[3] || !st->argv[3][0])
 		return false;
+	// Validate the script is one of the sed scripts we accept beyond numbers,
+	// so we don't accidentally treat unsupported sed forms as file-input shapes.
+	// Note: numeric N,M handling is covered elsewhere; here we only need to
+	// recognize /RE/ and s/RE/...
+	{
+		char cmd = 0;
+		aicli_dsl_stage_t tmp = *st;
+		tmp.argc = 3;
+		const char *re1 = NULL;
+		size_t re1_len = 0;
+		const char *re2 = NULL;
+		size_t re2_len = 0;
+		bool ok = aicli_parse_sed_re_args(&tmp, &re1, &re1_len, &re2, &re2_len, &cmd);
+		if (re1)
+			free((void *)re1);
+		if (re2)
+			free((void *)re2);
+		if (!ok) {
+			const char *pattern = NULL;
+			const char *repl = NULL;
+			bool global = false;
+			bool print_on_match = false;
+			ok = aicli_parse_sed_subst_args(&tmp, &pattern, &repl, &global, &print_on_match);
+		}
+		if (!ok)
+			return false;
+	}
 	return true;
 }
 
@@ -189,6 +233,7 @@ int aicli_execute_run_pipeline_from_file(const aicli_allowlist_t *allow,
 		bool ok = aicli_execute_apply_stage(stg, cur, cur_len, &tmp1);
 
 		if (!ok) {
+			dbg_print_stage(stg);
 			aicli_buf_free(&tmp1);
 			aicli_buf_free(&tmp2);
 			free(file_buf);

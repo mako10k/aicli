@@ -5,6 +5,8 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h> // For getenv
+#include <stdio.h>  // For fprintf
 
 static void aicli_dsl_strip_double_dash(const aicli_dsl_stage_t *st, const char *argv_out[8],
 				       int *argc_out)
@@ -384,16 +386,65 @@ static bool parse_sed_n_script(const char *script, size_t *out_start, size_t *ou
 
 static bool parse_sed_re_addr(const char *s, const char **out_re, size_t *out_re_len, const char **out_end)
 {
-	// Parse /RE/ where delimiter is fixed '/'. RE must be non-empty.
+	// Parse /RE/ in the sense of: '/RE/' for range/address separators.
+	// In our script syntax, the address part is: /RE/ as in /RE/p or /A/,/B/p.
+	// That means: leading '/', then RE (may include escaped '/' via '\/'), then
+	// a closing '/' delimiter.
+	// Minimal escape decoding:
+	//   \\/ -> /
+	//   \\\\ -> \\ 
+	// (debug logging removed)
 	if (!s || s[0] != '/')
 		return false;
 	const char *re = s + 1;
-	const char *end = strchr(re, '/');
-	if (!end || end == re)
+	const char *p = re;
+	while (*p) {
+		if (*p == '\\') {
+			if (p[1] == '\0')
+				return false;
+			p += 2;
+			continue;
+		}
+		if (*p == '/')
+			break;
+		p++;
+	}
+	if (*p != '/')
 		return false;
-	*out_re = re;
-	*out_re_len = (size_t)(end - re);
-	*out_end = end + 1;
+	if (p == re)
+		return false;
+	// (debug logging removed)
+
+	size_t raw_len = (size_t)(p - re);
+	char *decoded = (char *)malloc(raw_len + 1);
+	if (!decoded)
+		return false;
+	char *w = decoded;
+	for (size_t i = 0; i < raw_len; i++) {
+		char c = re[i];
+		if (c == '\\') {
+			if (i + 1 >= raw_len) {
+				free(decoded);
+				return false;
+			}
+			char n = re[i + 1];
+			if (n == '/' || n == '\\') {
+				*w++ = n;
+				i++;
+				continue;
+			}
+			// Keep other escapes as-is (e.g. \\{m,n\\} for BRE repetition)
+			*w++ = c;
+			continue;
+		}
+		*w++ = c;
+	}
+	*w = '\0';
+
+	*out_re = decoded;
+	*out_re_len = (size_t)(w - decoded);
+	// p currently points at the closing '/' delimiter.
+	*out_end = p;
 	return true;
 }
 
@@ -403,28 +454,68 @@ static bool parse_sed_re_script(const char *script, const char **out_re1, size_t
 	// Accept only:
 	//   /RE/p  /RE/d
 	//   /RE/,/RE/p  /RE/,/RE/d
-	// Delimiter is fixed to '/'. No escaping supported (safe subset).
+	// Delimiter is fixed to '/'.
 	if (!script || !*script)
 		return false;
+	const char *dbg = getenv("AICLI_DEBUG_EXEC_DSL");
+	if (dbg && dbg[0] != '\0')
+		fprintf(stderr, "[dsl] parse_sed_re_script: script=%s\n", script);
 
 	const char *re1 = NULL;
 	size_t re1_len = 0;
 	const char *p = NULL;
-	if (!parse_sed_re_addr(script, &re1, &re1_len, &p))
+	if (!parse_sed_re_addr(script, &re1, &re1_len, &p)) {
+		if (dbg && dbg[0] != '\0')
+			fprintf(stderr, "[dsl] parse_sed_re_script: addr1 failed\n");
 		return false;
+	}
+	if (dbg && dbg[0] != '\0')
+		fprintf(stderr, "[dsl] parse_sed_re_script: after addr1 p[0]=%c\n", p && p[0] ? p[0] : '0');
+	// p points at the closing '/' delimiter.
+	if (p[0] != '/') {
+		free((void *)re1);
+		if (dbg && dbg[0] != '\0')
+			fprintf(stderr, "[dsl] parse_sed_re_script: expected closing '/' after addr1\n");
+		return false;
+	}
+	p++; // move to either ',' (range) or 'p'/'d'
+	if (dbg && dbg[0] != '\0')
+		fprintf(stderr, "[dsl] parse_sed_re_script: after delim p[0]=%c\n", p && p[0] ? p[0] : '0');
 
 	const char *re2 = NULL;
 	size_t re2_len = 0;
 	if (p[0] == ',') {
 		p++;
-		if (!parse_sed_re_addr(p, &re2, &re2_len, &p))
+		if (!parse_sed_re_addr(p, &re2, &re2_len, &p)) {
+			free((void *)re1);
+			if (dbg && dbg[0] != '\0')
+				fprintf(stderr, "[dsl] parse_sed_re_script: addr2 failed\n");
 			return false;
+		}
+		// p points at the closing '/' delimiter of the second address.
+		if (p[0] != '/') {
+			free((void *)re1);
+			free((void *)re2);
+			if (dbg && dbg[0] != '\0')
+				fprintf(stderr, "[dsl] parse_sed_re_script: expected closing '/' after addr2\n");
+			return false;
+		}
+		p++; // move to 'p'/'d'
 	}
+	if (dbg && dbg[0] != '\0')
+		fprintf(stderr, "[dsl] parse_sed_re_script: cmd char p[0]=%c next=%c\n",
+		        p && p[0] ? p[0] : '0', p && p[1] ? p[1] : '0');
 
-	if (p[0] != 'p' && p[0] != 'd')
+	if (p[0] != 'p' && p[0] != 'd') {
+		free((void *)re1);
+		free((void *)re2);
 		return false;
-	if (p[1] != '\0')
+	}
+	if (p[1] != '\0') {
+		free((void *)re1);
+		free((void *)re2);
 		return false;
+	}
 
 	*out_re1 = re1;
 	*out_re1_len = re1_len;
@@ -455,22 +546,10 @@ bool aicli_stage_sed_n_re_addr(const char *in, size_t in_len, const char *re1, s
 	if (!in || !out || !re1 || re1_len == 0)
 		return false;
 
-	char *re1_z = (char *)malloc(re1_len + 1);
-	if (!re1_z)
-		return false;
-	memcpy(re1_z, re1, re1_len);
-	re1_z[re1_len] = '\0';
-
-	char *re2_z = NULL;
-	if (re2 && re2_len > 0) {
-		re2_z = (char *)malloc(re2_len + 1);
-		if (!re2_z) {
-			free(re1_z);
-			return false;
-		}
-		memcpy(re2_z, re2, re2_len);
-		re2_z[re2_len] = '\0';
-	}
+	// `re1`/`re2` are decoded + NUL-terminated by the parser.
+	// Ownership: stage frees them.
+	char *re1_z = (char *)re1;
+	char *re2_z = (re2 && re2_len > 0) ? (char *)re2 : NULL;
 
 	regex_t rx1;
 	memset(&rx1, 0, sizeof(rx1));
@@ -793,6 +872,8 @@ bool aicli_parse_sed_args(const aicli_dsl_stage_t *st, size_t *out_start, size_t
 	if (ac != 3)
 		return false;
 	if (strcmp(a[1], "-n") != 0)
+		return false;
+	if (a[2] && a[2][0] == '/')
 		return false;
 	return parse_sed_n_script(a[2], out_start, out_end, out_cmd);
 }
