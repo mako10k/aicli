@@ -334,6 +334,15 @@ size_t aicli_parse_head_n(const aicli_dsl_stage_t *st, bool *ok)
 	aicli_dsl_strip_double_dash(st, a, &ac);
 	if (ac == 1)
 		return 10;
+	if (ac == 2 && strncmp(a[1], "-n", 2) == 0 && a[1][2] != '\0') {
+		char *end = NULL;
+		unsigned long v = strtoul(a[1] + 2, &end, 10);
+		if (!end || *end != '\0') {
+			*ok = false;
+			return 0;
+		}
+		return (size_t)v;
+	}
 	if (ac == 3 && strcmp(a[1], "-n") == 0) {
 		char *end = NULL;
 		unsigned long v = strtoul(a[2], &end, 10);
@@ -356,6 +365,15 @@ size_t aicli_parse_tail_n(const aicli_dsl_stage_t *st, bool *ok)
 	aicli_dsl_strip_double_dash(st, a, &ac);
 	if (ac == 1)
 		return 10;
+	if (ac == 2 && strncmp(a[1], "-n", 2) == 0 && a[1][2] != '\0') {
+		char *end = NULL;
+		unsigned long v = strtoul(a[1] + 2, &end, 10);
+		if (!end || *end != '\0') {
+			*ok = false;
+			return 0;
+		}
+		return (size_t)v;
+	}
 	if (ac == 3 && strcmp(a[1], "-n") == 0) {
 		char *end = NULL;
 		unsigned long v = strtoul(a[2], &end, 10);

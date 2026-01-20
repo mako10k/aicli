@@ -90,7 +90,7 @@ static bool read_token(const char **p, char *buf, size_t buflen)
 		(*p)++;
 		while (**p && **p != quote) {
 			char ch = **p;
-			if (ch == '\\') {
+			if (quote == '"' && ch == '\\') {
 				// Minimal backslash escapes inside quotes.
 				(*p)++;
 				if (!**p)

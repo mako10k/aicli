@@ -43,11 +43,23 @@ test "$g2" = $'2:bar\n3:foo bar'
 # dsl: backslash escapes + double quotes
 printf "hello world\n" > tmp/esc.txt
 q1=$("$bin" _exec --file tmp/esc.txt "cat tmp/esc.txt | grep \"hello\\ world\"" 2>/dev/null | tr -d '\r')
-test "$q1" = "hello world"
+test "$q1" = $'hello world'
 
 # dsl: end-of-options marker '--'
 q2=$("$bin" _exec --file tmp/esc.txt "cat tmp/esc.txt | grep -- \"hello world\"" 2>/dev/null | tr -d '\r')
-test "$q2" = "hello world"
+test "$q2" = $'hello world'
+
+# dsl: single quotes treat backslash literally (POSIX-ish)
+printf '%s\n' $'a\\b' > tmp/sq.txt
+sq=$("$bin" _exec --file tmp/sq.txt "cat tmp/sq.txt | grep 'a\\b'" 2>/dev/null | tr -d '\r')
+test "$sq" = $'a\\b'
+
+# dsl: head/tail -nN short form
+printf "1\n2\n3\n" > tmp/hn.txt
+h1=$("$bin" _exec --file tmp/hn.txt "cat tmp/hn.txt | head -n2" 2>/dev/null | tr -d '\r')
+test "$h1" = $'1\n2'
+t1=$("$bin" _exec --file tmp/hn.txt "cat tmp/hn.txt | tail -n1" 2>/dev/null | tr -d '\r')
+test "$t1" = $'3'
 
 # pipe: sed (line address)
 printf "l1\nl2\nl3\n" > tmp/sed.txt
