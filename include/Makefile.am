@@ -17,5 +17,6 @@ nobase_include_HEADERS = \
 	web_tools.h \
 	web_search_tool.h \
 	web_fetch_tool.h \
+	md_render.h \
 	execute_dsl.h \
 	execute_tool.h

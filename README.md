@@ -11,6 +11,7 @@
 ## 依存
 - `libcurl`（HTTPS）
 - `yyjson`（JSON）
+- `md4c`（任意: Markdownサポートを有効にする場合）
 
 Debian/Ubuntu 例:
 
@@ -18,12 +19,23 @@ Debian/Ubuntu 例:
 sudo apt-get update
 sudo apt-get install -y build-essential pkg-config libcurl4-openssl-dev
 # yyjson は各自で導入（/usr/include/yyjson.h などに置く）
+# md4c を使う場合（任意）
+# sudo apt-get install -y libmd4c-dev
 ```
 
 ## ビルド
 
 ```bash
+./autogen.sh
+./configure                # md4c は auto 検出（見つかれば有効）
 make
+```
+
+`md4c` の切り替え:
+
+```bash
+./configure --enable-md4c   # 必須化（見つからなければ configure エラー）
+./configure --disable-md4c  # 明示的に無効化
 ```
 
 ## 実行（例）
@@ -122,6 +134,15 @@ export GOOGLE_CSE_CX=...
 
 allowlist に含まれるローカルファイルを、限定DSLで read-only 参照します。
 まず `list_allowed_files` で対象パスを把握してから `execute` するのが安全です。
+
+### `set_rendering_mode`（`HAVE_MD4C=1` のときのみ）
+
+最終応答テキストのレンダリングモードを切り替えるツールです。
+
+- `mode: "markdown"`（デフォルト）: md4c で Markdown をレンダリング
+- `mode: "plain"`: md4c を使わず、生テキストをそのまま出力
+
+`run` では、モデルが「プレーンテキストで出力してほしい」意図を検知した場合に、このツールを呼ぶ想定です。
 
 ## stdin（`run` / `_exec`）
 

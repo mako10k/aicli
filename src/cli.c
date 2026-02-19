@@ -672,10 +672,16 @@ static int cmd_list_tools(void)
 {
 	printf("Available tools:\n");
 	printf("  execute\n");
+#ifdef HAVE_MD4C
+	printf("  set_rendering_mode\n");
+#endif
 	printf("\n");
 	printf("Notes:\n");
 	printf("  - execute is read-only and limited to allowlisted files.\n");
 	printf("  - Use aicli run --file PATH to allow a file for execute.\n");
+#ifdef HAVE_MD4C
+	printf("  - set_rendering_mode accepts mode=plain|markdown (default: markdown).\n");
+#endif
 	return 0;
 }
 

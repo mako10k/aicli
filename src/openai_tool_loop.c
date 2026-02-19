@@ -14,11 +14,33 @@
 
 #include "allowlist_list_tool.h"
 #include "cli.h"
+#include "md_render.h"
 #include "paging_cache.h"
 #include "web_search_tool.h"
 #include "web_fetch_tool.h"
 
+#ifdef HAVE_MD4C
+typedef enum {
+	AICLI_RENDERING_MODE_MARKDOWN = 0,
+	AICLI_RENDERING_MODE_PLAIN = 1,
+} aicli_rendering_mode_t;
+#endif
+
 static const char *safe_str(const char *s) { return s ? s : ""; }
+
+static const char *tool_loop_instructions(void)
+{
+#ifdef HAVE_MD4C
+	return "You can use tools to gather data and control output style. "
+	       "When the user requests plain text, no markdown, or raw text output, "
+	       "call set_rendering_mode with mode='plain'. "
+	       "Otherwise keep default mode='markdown'. "
+	       "If uncertain, prefer markdown.";
+#else
+	return "You can use tools to gather data. "
+	       "Do not assume markdown rendering control is available.";
+#endif
+}
 
 static int debug_level_enabled(int level) { return level > 0; }
 
@@ -282,7 +304,7 @@ static char *build_execute_tool_json(void)
 	yyjson_mut_val *arr = yyjson_mut_arr(doc);
 	yyjson_mut_doc_set_root(doc, arr);
 
-	// tools: [{...execute...}, {...list_allowed_files...}]
+	// tools: [{...execute...}, {...list_allowed_files...}, ...]
 	yyjson_mut_val *tool = yyjson_mut_obj(doc);
 	yyjson_mut_arr_add_val(arr, tool);
 	yyjson_mut_obj_add_str(doc, tool, "type", "function");
@@ -525,6 +547,34 @@ static char *build_execute_tool_json(void)
 	yyjson_mut_obj_add_str(doc, p_size5, "description", "Max bytes to return (<=4096).");
 	yyjson_mut_obj_add_val(doc, props5, "size", p_size5);
 
+#ifdef HAVE_MD4C
+	// set_rendering_mode
+	yyjson_mut_val *tool6 = yyjson_mut_obj(doc);
+	yyjson_mut_arr_add_val(arr, tool6);
+	yyjson_mut_obj_add_str(doc, tool6, "type", "function");
+	yyjson_mut_obj_add_str(doc, tool6, "name", "set_rendering_mode");
+	yyjson_mut_obj_add_bool(doc, tool6, "strict", false);
+	yyjson_mut_obj_add_str(doc, tool6, "description",
+	                      "Set final response rendering mode. mode='markdown' (default) renders Markdown via md4c; mode='plain' outputs raw text.");
+
+	yyjson_mut_val *params6 = yyjson_mut_obj(doc);
+	yyjson_mut_obj_add_val(doc, tool6, "parameters", params6);
+	yyjson_mut_obj_add_str(doc, params6, "type", "object");
+	yyjson_mut_obj_add_bool(doc, params6, "additionalProperties", false);
+
+	yyjson_mut_val *props6 = yyjson_mut_obj(doc);
+	yyjson_mut_obj_add_val(doc, params6, "properties", props6);
+
+	yyjson_mut_val *p_mode6 = yyjson_mut_obj(doc);
+	yyjson_mut_obj_add_str(doc, p_mode6, "type", "string");
+	yyjson_mut_obj_add_str(doc, p_mode6, "description", "REQUIRED. Rendering mode: plain|markdown.");
+	yyjson_mut_obj_add_val(doc, props6, "mode", p_mode6);
+
+	yyjson_mut_val *req6 = yyjson_mut_arr(doc);
+	yyjson_mut_arr_add_str(doc, req6, "mode");
+	yyjson_mut_obj_add_val(doc, params6, "required", req6);
+#endif
+
 	char *json = yyjson_mut_write(doc, 0, NULL);
 	yyjson_mut_doc_free(doc);
 	return json;
@@ -559,6 +609,14 @@ typedef struct {
 	aicli_tool_result_t res;
 	bool done;
 } web_fetch_job_t;
+
+#ifdef HAVE_MD4C
+typedef struct {
+	const char *mode;
+	aicli_tool_result_t res;
+	bool done;
+} rendering_mode_job_t;
+#endif
 
 typedef struct {
 	char *topic;
@@ -972,6 +1030,79 @@ static void list_job_main(void *arg)
 
 	j->done = true;
 }
+
+#ifdef HAVE_MD4C
+static void free_rendering_mode_request_owned(const char **mode)
+{
+	if (!mode)
+		return;
+	free((void *)*mode);
+	*mode = NULL;
+}
+
+static int parse_set_rendering_mode_arguments(yyjson_val *args, const char **out_mode)
+{
+	if (!out_mode)
+		return 1;
+	*out_mode = NULL;
+
+	yyjson_doc *adoc = NULL;
+	yyjson_val *root = NULL;
+	if (!args)
+		return 1;
+
+	if (yyjson_is_str(args)) {
+		const char *s = yyjson_get_str(args);
+		if (s && s[0])
+			adoc = yyjson_read(s, strlen(s), 0);
+		if (adoc)
+			root = yyjson_doc_get_root(adoc);
+	} else if (yyjson_is_obj(args)) {
+		root = args;
+	}
+
+	if (!root || !yyjson_is_obj(root)) {
+		if (adoc)
+			yyjson_doc_free(adoc);
+		return 1;
+	}
+
+	yyjson_val *m = yyjson_obj_get(root, "mode");
+	if (m && yyjson_is_str(m))
+		*out_mode = yyjson_get_str(m);
+
+	if (adoc)
+		yyjson_doc_free(adoc);
+
+	if (!*out_mode)
+		return 1;
+	if (strcmp(*out_mode, "plain") != 0 && strcmp(*out_mode, "markdown") != 0)
+		return 1;
+	return 0;
+}
+
+static int dup_rendering_mode_request_string(const char **mode)
+{
+	if (!mode || !*mode)
+		return 1;
+	char *dup = dup_cstr(*mode);
+	if (!dup)
+		return 1;
+	*mode = dup;
+	return 0;
+}
+
+static char *build_set_rendering_mode_result_json(const char *mode)
+{
+	const char *m = mode ? mode : "markdown";
+	size_t need = strlen(m) + 32;
+	char *out = (char *)malloc(need);
+	if (!out)
+		return NULL;
+	snprintf(out, need, "{\"ok\":true,\"mode\":\"%s\"}", m);
+	return out;
+}
+#endif
 
 static char *build_function_call_output_item_json_raw(const char *call_id, const char *raw_json)
 {
@@ -1598,6 +1729,10 @@ int aicli_openai_run_with_tools(const aicli_config_t *cfg,
 	if (tool_threads == 0)
 		tool_threads = 1;
 
+#ifdef HAVE_MD4C
+	aicli_rendering_mode_t rendering_mode = AICLI_RENDERING_MODE_MARKDOWN;
+#endif
+
 	char *tools_json = build_execute_tool_json();
 	if (!tools_json)
 		return 2;
@@ -1646,7 +1781,7 @@ int aicli_openai_run_with_tools(const aicli_config_t *cfg,
 	}
 	int rc = 0;
 	if (previous_response_id && previous_response_id[0]) {
-		char *payload = build_initial_request_json(model, user_prompt, NULL,
+		char *payload = build_initial_request_json(model, user_prompt, tool_loop_instructions(),
 		                                        previous_response_id, tools_json, tool_choice);
 		if (!payload) {
 			free(tools_json);
@@ -1661,7 +1796,7 @@ int aicli_openai_run_with_tools(const aicli_config_t *cfg,
 		aicli_openai_request_t req0 = {
 		    .model = model,
 		    .input_text = user_prompt,
-		    .system_text = NULL,
+		    .system_text = tool_loop_instructions(),
 		};
 		rc = aicli_openai_responses_post(cfg->openai_api_key, cfg->openai_base_url,
 		                               &req0, tools_json, tool_choice, &http);
@@ -1711,6 +1846,17 @@ int aicli_openai_run_with_tools(const aicli_config_t *cfg,
 
 		char *final = extract_first_output_text(root);
 		if (final) {
+
+#ifdef HAVE_MD4C
+			if (rendering_mode == AICLI_RENDERING_MODE_MARKDOWN) {
+				char *rendered = aicli_render_markdown_text(final);
+				if (rendered) {
+					free(final);
+					final = rendered;
+				}
+			}
+#endif
+
 			if (out_final_response_json) {
 				*out_final_response_json = dup_cstr(http.body);
 			}
@@ -1741,14 +1887,26 @@ int aicli_openai_run_with_tools(const aicli_config_t *cfg,
 		web_search_job_t *sjobs = (web_search_job_t *)calloc(max_tool_calls_per_turn, sizeof(web_search_job_t));
 		web_fetch_job_t *fjobs = (web_fetch_job_t *)calloc(max_tool_calls_per_turn, sizeof(web_fetch_job_t));
 		cli_help_job_t *hjobs = (cli_help_job_t *)calloc(max_tool_calls_per_turn, sizeof(cli_help_job_t));
+#ifdef HAVE_MD4C
+		rendering_mode_job_t *mjobs =
+		    (rendering_mode_job_t *)calloc(max_tool_calls_per_turn, sizeof(rendering_mode_job_t));
+#endif
 		char **call_ids = (char **)calloc(max_tool_calls_per_turn, sizeof(char *));
 		char **items_json = (char **)calloc(max_tool_calls_per_turn, sizeof(char *));
+
+#ifdef HAVE_MD4C
+		if (!jobs || !ljobs || !sjobs || !fjobs || !hjobs || !mjobs || !call_ids || !items_json) {
+#else
 		if (!jobs || !ljobs || !sjobs || !fjobs || !hjobs || !call_ids || !items_json) {
+#endif
 			free(jobs);
 			free(ljobs);
 			free(sjobs);
 			free(fjobs);
 			free(hjobs);
+#ifdef HAVE_MD4C
+			free(mjobs);
+#endif
 			free(call_ids);
 			free(items_json);
 			yyjson_doc_free(doc);
@@ -1762,11 +1920,21 @@ int aicli_openai_run_with_tools(const aicli_config_t *cfg,
 		size_t web_search_count = 0;
 		size_t web_fetch_count = 0;
 		size_t cli_help_count = 0;
+#ifdef HAVE_MD4C
+		size_t rendering_mode_count = 0;
+#endif
 		{
 			yyjson_val *outarr = find_output_array(root);
 			if (outarr) {
 				size_t idx, max = yyjson_arr_size(outarr);
-				for (idx = 0; idx < max && (exec_count + list_count + web_search_count + web_fetch_count + cli_help_count) < max_tool_calls_per_turn; idx++) {
+				for (idx = 0;
+				     idx < max &&
+				     (exec_count + list_count + web_search_count + web_fetch_count + cli_help_count
+#ifdef HAVE_MD4C
+				      + rendering_mode_count
+#endif
+				      ) < max_tool_calls_per_turn;
+				     idx++) {
 					yyjson_val *item = yyjson_arr_get(outarr, idx);
 					if (!item || !yyjson_is_obj(item))
 						continue;
@@ -1845,11 +2013,31 @@ int aicli_openai_run_with_tools(const aicli_config_t *cfg,
 						cli_help_count++;
 						continue;
 					}
+
+#ifdef HAVE_MD4C
+					if (nstr && strcmp(nstr, "set_rendering_mode") == 0) {
+						mjobs[rendering_mode_count].done = false;
+						mjobs[rendering_mode_count].mode = NULL;
+						if (parse_set_rendering_mode_arguments(args, &mjobs[rendering_mode_count].mode) == 0 &&
+						    dup_rendering_mode_request_string(&mjobs[rendering_mode_count].mode) == 0) {
+							call_ids[exec_count + list_count + web_search_count + web_fetch_count + cli_help_count +
+							         rendering_mode_count] = dup_cstr(cid);
+							rendering_mode_count++;
+						} else {
+							free_rendering_mode_request_owned(&mjobs[rendering_mode_count].mode);
+						}
+						continue;
+					}
+#endif
 				}
 			}
 		}
 
-		size_t call_count = exec_count + list_count + web_search_count + web_fetch_count + cli_help_count;
+		size_t call_count = exec_count + list_count + web_search_count + web_fetch_count + cli_help_count
+#ifdef HAVE_MD4C
+		    + rendering_mode_count
+#endif
+		    ;
 		if (call_count == 0) {
 			const char *bad_call_id = find_first_execute_call_id(root);
 			if (bad_call_id && bad_call_id[0]) {
@@ -1862,6 +2050,9 @@ int aicli_openai_run_with_tools(const aicli_config_t *cfg,
 			free(sjobs);
 			free(fjobs);
 			free(hjobs);
+#ifdef HAVE_MD4C
+			free(mjobs);
+#endif
 			for (size_t k = 0; k < max_tool_calls_per_turn; k++)
 				free(call_ids[k]);
 			free(call_ids);
@@ -1877,6 +2068,15 @@ int aicli_openai_run_with_tools(const aicli_config_t *cfg,
 		aicli_threadpool_t *tp = aicli_threadpool_create(tool_threads);
 		if (!tp) {
 			free(jobs);
+			free(ljobs);
+			free(sjobs);
+			free(fjobs);
+			free(hjobs);
+#ifdef HAVE_MD4C
+			free(mjobs);
+#endif
+			for (size_t k = 0; k < max_tool_calls_per_turn; k++)
+				free(call_ids[k]);
 			free(call_ids);
 			free(items_json);
 			yyjson_doc_free(doc);
@@ -1901,6 +2101,25 @@ int aicli_openai_run_with_tools(const aicli_config_t *cfg,
 		}
 		aicli_threadpool_drain(tp);
 		aicli_threadpool_destroy(tp);
+
+#ifdef HAVE_MD4C
+		for (size_t i = 0; i < rendering_mode_count; i++) {
+			mjobs[i].res = (aicli_tool_result_t){0};
+			mjobs[i].done = true;
+			if (mjobs[i].mode && strcmp(mjobs[i].mode, "plain") == 0)
+				rendering_mode = AICLI_RENDERING_MODE_PLAIN;
+			else
+				rendering_mode = AICLI_RENDERING_MODE_MARKDOWN;
+
+			const char *effective =
+			    (rendering_mode == AICLI_RENDERING_MODE_PLAIN) ? "plain" : "markdown";
+			mjobs[i].res.stdout_text = build_set_rendering_mode_result_json(effective);
+			if (mjobs[i].res.stdout_text)
+				mjobs[i].res.stdout_len = strlen(mjobs[i].res.stdout_text);
+			mjobs[i].res.exit_code = 0;
+			mjobs[i].res.total_bytes = mjobs[i].res.stdout_len;
+		}
+#endif
 
 		if (cfg && debug_level_enabled(cfg->debug_function_call) && cfg->debug_function_call >= 2) {
 			size_t maxb = debug_max_bytes_for_level(cfg->debug_function_call);
@@ -1937,6 +2156,14 @@ int aicli_openai_run_with_tools(const aicli_config_t *cfg,
 			        call_ids[exec_count + list_count + web_search_count + web_fetch_count + i],
 			        &hjobs[i].res);
 		}
+#ifdef HAVE_MD4C
+		for (size_t i = 0; i < rendering_mode_count; i++) {
+			items_json[exec_count + list_count + web_search_count + web_fetch_count + cli_help_count + i] =
+			    build_function_call_output_item_json(
+			        call_ids[exec_count + list_count + web_search_count + web_fetch_count + cli_help_count + i],
+			        &mjobs[i].res);
+		}
+#endif
 		for (size_t i = 0; i < call_count; i++) {
 			if (!items_json[i] || !items_json[i][0]) {
 				fprintf(stderr,
@@ -1961,6 +2188,10 @@ int aicli_openai_run_with_tools(const aicli_config_t *cfg,
 				free(ljobs);
 				free(sjobs);
 				free(fjobs);
+				free(hjobs);
+#ifdef HAVE_MD4C
+				free(mjobs);
+#endif
 				free(call_ids);
 				yyjson_doc_free(doc);
 				aicli_openai_http_response_free(&http);
@@ -2009,6 +2240,13 @@ int aicli_openai_run_with_tools(const aicli_config_t *cfg,
 				free((void *)hjobs[i].res.stdout_text);
 			free(hjobs[i].topic);
 		}
+#ifdef HAVE_MD4C
+		for (size_t i = 0; i < rendering_mode_count; i++) {
+			if (mjobs[i].res.stdout_text)
+				free((void *)mjobs[i].res.stdout_text);
+			free_rendering_mode_request_owned(&mjobs[i].mode);
+		}
+#endif
 		for (size_t i = 0; i < call_count; i++) {
 			free(items_json[i]);
 			free(call_ids[i]);
@@ -2020,6 +2258,9 @@ int aicli_openai_run_with_tools(const aicli_config_t *cfg,
 		free(ljobs);
 		free(sjobs);
 		free(fjobs);
+#ifdef HAVE_MD4C
+		free(mjobs);
+#endif
 		yyjson_doc_free(doc);
 
 		if (!next_payload)
