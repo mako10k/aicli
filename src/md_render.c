@@ -18,11 +18,14 @@ typedef struct {
 	unsigned heading_level;
 	int strong_depth;
 	int em_depth;
+	int del_depth;
 	int code_span_depth;
 	int link_depth;
 	bool in_code_block;
 	int style_bold;
+	int style_italic;
 	int style_underline;
+	int style_strike;
 	int style_color;
 } md_plain_ctx_t;
 
@@ -89,7 +92,9 @@ static int apply_style(md_plain_ctx_t *ctx)
 		return 0;
 
 	int bold = (ctx->heading_level > 0) || (ctx->strong_depth > 0);
-	int underline = (ctx->em_depth > 0) || (ctx->link_depth > 0);
+	int italic = (ctx->em_depth > 0);
+	int underline = (ctx->link_depth > 0);
+	int strike = (ctx->del_depth > 0);
 	int color = 0;
 	if (ctx->heading_level > 0)
 		color = 36; // cyan
@@ -98,17 +103,20 @@ static int apply_style(md_plain_ctx_t *ctx)
 	else if (ctx->link_depth > 0)
 		color = 34; // blue
 
-	if (bold == ctx->style_bold && underline == ctx->style_underline && color == ctx->style_color)
+	if (bold == ctx->style_bold && italic == ctx->style_italic && underline == ctx->style_underline &&
+	    strike == ctx->style_strike && color == ctx->style_color)
 		return 0;
 
 	ctx->style_bold = bold;
+	ctx->style_italic = italic;
 	ctx->style_underline = underline;
+	ctx->style_strike = strike;
 	ctx->style_color = color;
 
 	if (!aicli_buf_append(&ctx->out, "\x1b[0m", 4))
 		return 1;
 
-	if (!bold && !underline && color == 0)
+	if (!bold && !italic && !underline && !strike && color == 0)
 		return 0;
 
 	char seq[64];
@@ -122,8 +130,18 @@ static int apply_style(md_plain_ctx_t *ctx)
 			return 1;
 		first = false;
 	}
+	if (italic) {
+		if (sb_addf(seq, sizeof(seq), &pos, "%s3", first ? "" : ";") != 0)
+			return 1;
+		first = false;
+	}
 	if (underline) {
 		if (sb_addf(seq, sizeof(seq), &pos, "%s4", first ? "" : ";") != 0)
+			return 1;
+		first = false;
+	}
+	if (strike) {
+		if (sb_addf(seq, sizeof(seq), &pos, "%s9", first ? "" : ";") != 0)
 			return 1;
 		first = false;
 	}
@@ -216,6 +234,11 @@ static int on_enter_span(MD_SPANTYPE type, void *detail, void *userdata)
 	case MD_SPAN_A:
 		ctx->link_depth++;
 		return apply_style(ctx);
+#ifdef MD_SPAN_DEL
+	case MD_SPAN_DEL:
+		ctx->del_depth++;
+		return apply_style(ctx);
+#endif
 	default:
 		return 0;
 	}
@@ -245,6 +268,12 @@ static int on_leave_span(MD_SPANTYPE type, void *detail, void *userdata)
 		if (ctx->link_depth > 0)
 			ctx->link_depth--;
 		return apply_style(ctx);
+#ifdef MD_SPAN_DEL
+	case MD_SPAN_DEL:
+		if (ctx->del_depth > 0)
+			ctx->del_depth--;
+		return apply_style(ctx);
+#endif
 	default:
 		return 0;
 	}
@@ -279,6 +308,9 @@ char *aicli_render_markdown_text(const char *input)
 	memset(&parser, 0, sizeof(parser));
 	parser.abi_version = 0;
 	parser.flags = MD_DIALECT_COMMONMARK;
+#ifdef MD_FLAG_STRIKETHROUGH
+	parser.flags |= MD_FLAG_STRIKETHROUGH;
+#endif
 	parser.enter_block = on_enter_block;
 	parser.leave_block = on_leave_block;
 	parser.enter_span = on_enter_span;
@@ -290,7 +322,7 @@ char *aicli_render_markdown_text(const char *input)
 		aicli_buf_free(&ctx.out);
 		return dup_cstr_local(input);
 	}
-	if (ctx.use_ansi && (ctx.style_bold || ctx.style_underline || ctx.style_color)) {
+	if (ctx.use_ansi && (ctx.style_bold || ctx.style_italic || ctx.style_underline || ctx.style_strike || ctx.style_color)) {
 		if (!aicli_buf_append(&ctx.out, "\x1b[0m", 4)) {
 			aicli_buf_free(&ctx.out);
 			return dup_cstr_local(input);
