@@ -258,4 +258,26 @@ echo "$conf_explicit" | grep -q 'MODEL_FROM_EXPLICIT'
 
 rm -rf tmp
 
+# debug level parsing: reject non-numeric values as format errors
+set +e
+dbg_err=$(OPENAI_API_KEY=dummy "$bin" run --debug-all='*' "ping" 2>&1)
+rc=$?
+set -e
+test $rc -eq 2
+assert_contains "$dbg_err" "invalid --debug-all level"
+
+set +e
+dbg_err=$(OPENAI_API_KEY=dummy "$bin" run --debug-api=abc "ping" 2>&1)
+rc=$?
+set -e
+test $rc -eq 2
+assert_contains "$dbg_err" "invalid --debug-api level"
+
+set +e
+dbg_err=$(OPENAI_API_KEY=dummy "$bin" run --debug-function-call=xyz "ping" 2>&1)
+rc=$?
+set -e
+test $rc -eq 2
+assert_contains "$dbg_err" "invalid --debug-function-call level"
+
 echo "OK (scaffold)"

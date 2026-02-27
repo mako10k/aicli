@@ -6,6 +6,8 @@
 #include <fcntl.h>
 #include <unistd.h>
 #include <sys/ioctl.h>
+#include <time.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -647,18 +649,20 @@ static int parse_optional_level(const char *opt, const char *next, bool has_next
 
 	const char *eq = strchr(opt, '=');
 	if (eq && eq[1]) {
+		char *endp = NULL;
 		errno = 0;
-		long v = strtol(eq + 1, NULL, 10);
-		if (errno != 0 || v < 0 || v > 10)
+		long v = strtol(eq + 1, &endp, 10);
+		if (errno != 0 || endp == (eq + 1) || !endp || *endp != '\0' || v < 0 || v > 10)
 			return 1;
 		*out_level = (int)v;
 		return 0;
 	}
 
 	if (has_next && next && next[0] && next[0] != '-') {
+		char *endp = NULL;
 		errno = 0;
-		long v = strtol(next, NULL, 10);
-		if (errno != 0 || v < 0 || v > 10)
+		long v = strtol(next, &endp, 10);
+		if (errno != 0 || endp == next || !endp || *endp != '\0' || v < 0 || v > 10)
 			return 1;
 		*out_level = (int)v;
 		*out_consumed_next = 1;
@@ -666,6 +670,455 @@ static int parse_optional_level(const char *opt, const char *next, bool has_next
 	}
 
 	return 0;
+}
+
+typedef struct {
+	bool loaded;
+	bool has_saved_unix;
+	long long saved_unix;
+	bool auto_search;
+	bool disable_all_tools;
+	size_t turns;
+	size_t max_tool_calls;
+	size_t tool_threads;
+	int debug_api;
+	int debug_function_call;
+	char search_provider[32];
+	bool has_google_api_key;
+	bool has_google_cse_cx;
+	bool has_brave_api_key;
+	bool has_web_fetch_prefixes;
+	char force_tool[64];
+	char available_tools[128];
+	char continue_mode[16];
+	bool continue_has_thread;
+	char continue_thread[64];
+} continue_meta_t;
+
+static const char *continue_mode_to_string_local(aicli_continue_mode_t m)
+{
+	switch (m) {
+	case AICLI_CONTINUE_AUTO:
+		return "auto";
+	case AICLI_CONTINUE_BOTH:
+		return "both";
+	case AICLI_CONTINUE_AFTER:
+		return "after";
+	case AICLI_CONTINUE_NEXT:
+		return "next";
+	}
+	return "auto";
+}
+
+static const char *search_provider_to_string_local(aicli_search_provider_t p)
+{
+	if (p == AICLI_SEARCH_PROVIDER_BRAVE)
+		return "brave";
+	return "google_cse";
+}
+
+static void trim_line_eol(char *s)
+{
+	if (!s)
+		return;
+	size_t n = strlen(s);
+	while (n > 0 && (s[n - 1] == '\n' || s[n - 1] == '\r')) {
+		s[n - 1] = '\0';
+		n--;
+	}
+}
+
+static void copy_cstr(char *dst, size_t cap, const char *src)
+{
+	if (!dst || cap == 0)
+		return;
+	if (!src)
+		src = "";
+	strncpy(dst, src, cap - 1);
+	dst[cap - 1] = '\0';
+}
+
+static int continue_meta_path_from_state(const char *state_path, char *out, size_t out_cap)
+{
+	if (!state_path || !state_path[0] || !out || out_cap == 0)
+		return -1;
+	int n = snprintf(out, out_cap, "%s.meta", state_path);
+	if (n <= 0 || (size_t)n >= out_cap)
+		return -1;
+	return 0;
+}
+
+static void continue_meta_from_current(continue_meta_t *m,
+					      const aicli_config_t *cfg,
+					      bool auto_search,
+					      int disable_all_tools,
+					      const char *available_tools,
+					      const char *force_tool,
+					      int debug_api,
+					      int debug_function_call,
+					      size_t turns,
+					      size_t max_tool_calls,
+					      size_t tool_threads,
+					      const aicli_continue_opt_t *cont)
+{
+	if (!m)
+		return;
+	memset(m, 0, sizeof(*m));
+	m->loaded = true;
+	m->auto_search = auto_search;
+	m->disable_all_tools = (disable_all_tools != 0);
+	m->turns = turns;
+	m->max_tool_calls = max_tool_calls;
+	m->tool_threads = tool_threads;
+	m->debug_api = debug_api;
+	m->debug_function_call = debug_function_call;
+	copy_cstr(m->search_provider, sizeof(m->search_provider),
+		  search_provider_to_string_local(cfg ? cfg->search_provider : AICLI_SEARCH_PROVIDER_GOOGLE_CSE));
+	m->has_google_api_key = (cfg && cfg->google_api_key && cfg->google_api_key[0]);
+	m->has_google_cse_cx = (cfg && cfg->google_cse_cx && cfg->google_cse_cx[0]);
+	m->has_brave_api_key = (cfg && cfg->brave_api_key && cfg->brave_api_key[0]);
+	{
+		const char *v = getenv("AICLI_WEB_FETCH_PREFIXES");
+		m->has_web_fetch_prefixes = (v && v[0]);
+	}
+	copy_cstr(m->force_tool, sizeof(m->force_tool), force_tool ? force_tool : "");
+	copy_cstr(m->available_tools, sizeof(m->available_tools), available_tools ? available_tools : "");
+	if (cont) {
+		copy_cstr(m->continue_mode, sizeof(m->continue_mode), continue_mode_to_string_local(cont->mode));
+		m->continue_has_thread = cont->has_thread;
+		copy_cstr(m->continue_thread, sizeof(m->continue_thread), cont->has_thread ? cont->thread_name : "");
+	} else {
+		copy_cstr(m->continue_mode, sizeof(m->continue_mode), "auto");
+	}
+}
+
+static int continue_meta_write(const char *state_path, const continue_meta_t *m)
+{
+	char meta_path[4120];
+	if (continue_meta_path_from_state(state_path, meta_path, sizeof(meta_path)) != 0)
+		return -1;
+	if (!m)
+		return -1;
+
+	FILE *fp = fopen(meta_path, "w");
+	if (!fp)
+		return -1;
+
+	fprintf(fp, "version=1\n");
+	fprintf(fp, "saved_unix=%lld\n", m->has_saved_unix ? m->saved_unix : 0LL);
+	fprintf(fp, "auto_search=%d\n", m->auto_search ? 1 : 0);
+	fprintf(fp, "disable_all_tools=%d\n", m->disable_all_tools ? 1 : 0);
+	fprintf(fp, "turns=%zu\n", m->turns);
+	fprintf(fp, "max_tool_calls=%zu\n", m->max_tool_calls);
+	fprintf(fp, "tool_threads=%zu\n", m->tool_threads);
+	fprintf(fp, "debug_api=%d\n", m->debug_api);
+	fprintf(fp, "debug_function_call=%d\n", m->debug_function_call);
+	fprintf(fp, "search_provider=%s\n", m->search_provider[0] ? m->search_provider : "google_cse");
+	fprintf(fp, "has_google_api_key=%d\n", m->has_google_api_key ? 1 : 0);
+	fprintf(fp, "has_google_cse_cx=%d\n", m->has_google_cse_cx ? 1 : 0);
+	fprintf(fp, "has_brave_api_key=%d\n", m->has_brave_api_key ? 1 : 0);
+	fprintf(fp, "has_web_fetch_prefixes=%d\n", m->has_web_fetch_prefixes ? 1 : 0);
+	fprintf(fp, "force_tool=%s\n", m->force_tool);
+	fprintf(fp, "available_tools=%s\n", m->available_tools);
+	fprintf(fp, "continue_mode=%s\n", m->continue_mode[0] ? m->continue_mode : "auto");
+	fprintf(fp, "continue_has_thread=%d\n", m->continue_has_thread ? 1 : 0);
+	fprintf(fp, "continue_thread=%s\n", m->continue_thread);
+
+	if (fclose(fp) != 0)
+		return -1;
+	return 0;
+}
+
+static int continue_meta_read(const char *state_path, continue_meta_t *out)
+{
+	char meta_path[4120];
+	if (continue_meta_path_from_state(state_path, meta_path, sizeof(meta_path)) != 0)
+		return -1;
+	if (!out)
+		return -1;
+	memset(out, 0, sizeof(*out));
+
+	FILE *fp = fopen(meta_path, "r");
+	if (!fp)
+		return -1;
+
+	char line[512];
+	while (fgets(line, sizeof(line), fp)) {
+		trim_line_eol(line);
+		char *eq = strchr(line, '=');
+		if (!eq)
+			continue;
+		*eq = '\0';
+		const char *k = line;
+		const char *v = eq + 1;
+
+		if (strcmp(k, "saved_unix") == 0) {
+			char *endp = NULL;
+			errno = 0;
+			long long t = strtoll(v, &endp, 10);
+			if (errno == 0 && endp && *endp == '\0' && t > 0) {
+				out->saved_unix = t;
+				out->has_saved_unix = true;
+			}
+			continue;
+		}
+		if (strcmp(k, "auto_search") == 0) {
+			out->auto_search = (atoi(v) != 0);
+			continue;
+		}
+		if (strcmp(k, "disable_all_tools") == 0) {
+			out->disable_all_tools = (atoi(v) != 0);
+			continue;
+		}
+		if (strcmp(k, "turns") == 0) {
+			out->turns = (size_t)strtoull(v, NULL, 10);
+			continue;
+		}
+		if (strcmp(k, "max_tool_calls") == 0) {
+			out->max_tool_calls = (size_t)strtoull(v, NULL, 10);
+			continue;
+		}
+		if (strcmp(k, "tool_threads") == 0) {
+			out->tool_threads = (size_t)strtoull(v, NULL, 10);
+			continue;
+		}
+		if (strcmp(k, "debug_api") == 0) {
+			out->debug_api = atoi(v);
+			continue;
+		}
+		if (strcmp(k, "debug_function_call") == 0) {
+			out->debug_function_call = atoi(v);
+			continue;
+		}
+		if (strcmp(k, "search_provider") == 0) {
+			copy_cstr(out->search_provider, sizeof(out->search_provider), v);
+			continue;
+		}
+		if (strcmp(k, "has_google_api_key") == 0) {
+			out->has_google_api_key = (atoi(v) != 0);
+			continue;
+		}
+		if (strcmp(k, "has_google_cse_cx") == 0) {
+			out->has_google_cse_cx = (atoi(v) != 0);
+			continue;
+		}
+		if (strcmp(k, "has_brave_api_key") == 0) {
+			out->has_brave_api_key = (atoi(v) != 0);
+			continue;
+		}
+		if (strcmp(k, "has_web_fetch_prefixes") == 0) {
+			out->has_web_fetch_prefixes = (atoi(v) != 0);
+			continue;
+		}
+		if (strcmp(k, "force_tool") == 0) {
+			copy_cstr(out->force_tool, sizeof(out->force_tool), v);
+			continue;
+		}
+		if (strcmp(k, "available_tools") == 0) {
+			copy_cstr(out->available_tools, sizeof(out->available_tools), v);
+			continue;
+		}
+		if (strcmp(k, "continue_mode") == 0) {
+			copy_cstr(out->continue_mode, sizeof(out->continue_mode), v);
+			continue;
+		}
+		if (strcmp(k, "continue_has_thread") == 0) {
+			out->continue_has_thread = (atoi(v) != 0);
+			continue;
+		}
+		if (strcmp(k, "continue_thread") == 0) {
+			copy_cstr(out->continue_thread, sizeof(out->continue_thread), v);
+			continue;
+		}
+	}
+
+	(void)fclose(fp);
+	out->loaded = true;
+	if (!out->search_provider[0])
+		copy_cstr(out->search_provider, sizeof(out->search_provider), "google_cse");
+	if (!out->continue_mode[0])
+		copy_cstr(out->continue_mode, sizeof(out->continue_mode), "auto");
+	return 0;
+}
+
+static bool appendf(char *buf, size_t cap, size_t *len, const char *fmt, ...)
+{
+	if (!buf || !len || !fmt || *len >= cap)
+		return false;
+	va_list ap;
+	va_start(ap, fmt);
+	int n = vsnprintf(buf + *len, cap - *len, fmt, ap);
+	va_end(ap);
+	if (n <= 0)
+		return false;
+	if ((size_t)n >= (cap - *len)) {
+		*len = cap;
+		return false;
+	}
+	*len += (size_t)n;
+	return true;
+}
+
+static void format_time_utc(long long t, char out[32])
+{
+	if (!out)
+		return;
+	if (t <= 0) {
+		copy_cstr(out, 32, "unknown");
+		return;
+	}
+	time_t tt = (time_t)t;
+	struct tm tmv;
+	if (!gmtime_r(&tt, &tmv)) {
+		copy_cstr(out, 32, "unknown");
+		return;
+	}
+	if (strftime(out, 32, "%Y-%m-%dT%H:%M:%SZ", &tmv) == 0)
+		copy_cstr(out, 32, "unknown");
+}
+
+static bool streq0(const char *a, const char *b)
+{
+	const char *x = a ? a : "";
+	const char *y = b ? b : "";
+	return strcmp(x, y) == 0;
+}
+
+static char *build_continue_delta_context(const continue_meta_t *prev, const continue_meta_t *cur)
+{
+	if (!cur || !cur->loaded)
+		return NULL;
+
+	char *buf = (char *)malloc(4096);
+	if (!buf)
+		return NULL;
+	size_t len = 0;
+	buf[0] = '\0';
+
+	long long now_unix = (long long)time(NULL);
+	char now_iso[32];
+	format_time_utc(now_unix, now_iso);
+	(void)appendf(buf, 4096, &len,
+		      "CONTINUE_DELTA_CONTEXT:\n"
+		      "- current_time_utc: %s\n",
+		      now_iso);
+
+	if (!prev || !prev->loaded) {
+		(void)appendf(buf, 4096, &len, "- previous_snapshot: unavailable\n");
+	} else if (prev->has_saved_unix) {
+		char prev_iso[32];
+		format_time_utc(prev->saved_unix, prev_iso);
+		long long delta = now_unix - prev->saved_unix;
+		if (delta < 0)
+			delta = 0;
+		(void)appendf(buf, 4096, &len,
+			      "- previous_time_utc: %s\n"
+			      "- elapsed_seconds_since_previous: %lld\n",
+			      prev_iso, delta);
+	}
+
+	int changes = 0;
+	if (prev && prev->loaded) {
+		if (prev->auto_search != cur->auto_search) {
+			changes++;
+			(void)appendf(buf, 4096, &len, "- changed.auto_search: %s -> %s\n",
+				      prev->auto_search ? "on" : "off", cur->auto_search ? "on" : "off");
+		}
+		if (prev->disable_all_tools != cur->disable_all_tools) {
+			changes++;
+			(void)appendf(buf, 4096, &len, "- changed.disable_all_tools: %s -> %s\n",
+				      prev->disable_all_tools ? "on" : "off",
+				      cur->disable_all_tools ? "on" : "off");
+		}
+		if (!streq0(prev->force_tool, cur->force_tool)) {
+			changes++;
+			(void)appendf(buf, 4096, &len, "- changed.force_tool: %s -> %s\n",
+				      prev->force_tool[0] ? prev->force_tool : "(none)",
+				      cur->force_tool[0] ? cur->force_tool : "(none)");
+		}
+		if (!streq0(prev->available_tools, cur->available_tools)) {
+			changes++;
+			(void)appendf(buf, 4096, &len, "- changed.available_tools: %s -> %s\n",
+				      prev->available_tools[0] ? prev->available_tools : "(default)",
+				      cur->available_tools[0] ? cur->available_tools : "(default)");
+		}
+		if (!streq0(prev->search_provider, cur->search_provider)) {
+			changes++;
+			(void)appendf(buf, 4096, &len, "- changed.search_provider: %s -> %s\n",
+				      prev->search_provider[0] ? prev->search_provider : "google_cse",
+				      cur->search_provider[0] ? cur->search_provider : "google_cse");
+		}
+		if (prev->has_google_api_key != cur->has_google_api_key) {
+			changes++;
+			(void)appendf(buf, 4096, &len, "- changed.has_google_api_key: %s -> %s\n",
+				      prev->has_google_api_key ? "yes" : "no",
+				      cur->has_google_api_key ? "yes" : "no");
+		}
+		if (prev->has_google_cse_cx != cur->has_google_cse_cx) {
+			changes++;
+			(void)appendf(buf, 4096, &len, "- changed.has_google_cse_cx: %s -> %s\n",
+				      prev->has_google_cse_cx ? "yes" : "no",
+				      cur->has_google_cse_cx ? "yes" : "no");
+		}
+		if (prev->has_brave_api_key != cur->has_brave_api_key) {
+			changes++;
+			(void)appendf(buf, 4096, &len, "- changed.has_brave_api_key: %s -> %s\n",
+				      prev->has_brave_api_key ? "yes" : "no",
+				      cur->has_brave_api_key ? "yes" : "no");
+		}
+		if (prev->has_web_fetch_prefixes != cur->has_web_fetch_prefixes) {
+			changes++;
+			(void)appendf(buf, 4096, &len, "- changed.has_web_fetch_prefixes: %s -> %s\n",
+				      prev->has_web_fetch_prefixes ? "yes" : "no",
+				      cur->has_web_fetch_prefixes ? "yes" : "no");
+		}
+		if (!streq0(prev->continue_mode, cur->continue_mode)) {
+			changes++;
+			(void)appendf(buf, 4096, &len, "- changed.continue_mode: %s -> %s\n",
+				      prev->continue_mode[0] ? prev->continue_mode : "auto",
+				      cur->continue_mode[0] ? cur->continue_mode : "auto");
+		}
+		if (prev->continue_has_thread != cur->continue_has_thread ||
+		    !streq0(prev->continue_thread, cur->continue_thread)) {
+			changes++;
+			(void)appendf(buf, 4096, &len, "- changed.continue_thread: %s -> %s\n",
+				      (prev->continue_has_thread && prev->continue_thread[0]) ? prev->continue_thread
+				                                                        : "(none)",
+				      (cur->continue_has_thread && cur->continue_thread[0]) ? cur->continue_thread
+				                                                        : "(none)");
+		}
+		if (prev->turns != cur->turns) {
+			changes++;
+			(void)appendf(buf, 4096, &len, "- changed.turns: %zu -> %zu\n", prev->turns, cur->turns);
+		}
+		if (prev->max_tool_calls != cur->max_tool_calls) {
+			changes++;
+			(void)appendf(buf, 4096, &len, "- changed.max_tool_calls: %zu -> %zu\n",
+				      prev->max_tool_calls, cur->max_tool_calls);
+		}
+		if (prev->tool_threads != cur->tool_threads) {
+			changes++;
+			(void)appendf(buf, 4096, &len, "- changed.tool_threads: %zu -> %zu\n",
+				      prev->tool_threads, cur->tool_threads);
+		}
+		if (prev->debug_api != cur->debug_api) {
+			changes++;
+			(void)appendf(buf, 4096, &len, "- changed.debug_api: %d -> %d\n",
+				      prev->debug_api, cur->debug_api);
+		}
+		if (prev->debug_function_call != cur->debug_function_call) {
+			changes++;
+			(void)appendf(buf, 4096, &len, "- changed.debug_function_call: %d -> %d\n",
+				      prev->debug_function_call, cur->debug_function_call);
+		}
+	}
+
+	if (changes == 0)
+		(void)appendf(buf, 4096, &len, "- changed.settings: none_detected\n");
+
+	(void)appendf(buf, 4096, &len,
+		      "- instruction: prioritize current run settings when prior conversation assumptions conflict.\n");
+	return buf;
 }
 
 static int cmd_list_tools(void)
@@ -797,6 +1250,10 @@ static int cmd_run(int argc, char **argv, const aicli_config_t *cfg)
 	prev_id[0] = '\0';
 	char state_path[4096];
 	state_path[0] = '\0';
+	continue_meta_t prev_meta;
+	continue_meta_t curr_meta;
+	memset(&prev_meta, 0, sizeof(prev_meta));
+	memset(&curr_meta, 0, sizeof(curr_meta));
 
 	int i = 2;
 	while (i < argc && strncmp(argv[i], "--", 2) == 0) {
@@ -982,6 +1439,7 @@ static int cmd_run(int argc, char **argv, const aicli_config_t *cfg)
 		int rrc = aicli_continue_read_id(state_path, prev_id, sizeof(prev_id));
 		if (rrc == 0) {
 			previous_response_id = prev_id;
+			(void)continue_meta_read(state_path, &prev_meta);
 		} else if (rrc == 1) {
 			// Missing state is OK: we will just start a new conversation.
 			previous_response_id = NULL;
@@ -1055,6 +1513,8 @@ static int cmd_run(int argc, char **argv, const aicli_config_t *cfg)
 	}
 
 	char *augmented_prompt = NULL;
+	char *continue_delta = NULL;
+	char *final_prompt = NULL;
 	if (auto_search) {
 		char *query = NULL;
 		bool will_search = aicli_auto_search_plan(cfg, prompt, &query);
@@ -1262,6 +1722,26 @@ static int cmd_run(int argc, char **argv, const aicli_config_t *cfg)
 		}
 	}
 
+	if (want_continue) {
+		continue_meta_from_current(&curr_meta, cfg, auto_search, disable_all_tools,
+					     available_tools, force_tool,
+					     debug_api, debug_function_call,
+					     turns, max_tool_calls, tool_threads,
+					     &cont);
+	}
+
+	if (want_continue && previous_response_id && previous_response_id[0]) {
+		continue_delta = build_continue_delta_context(&prev_meta, &curr_meta);
+		if (continue_delta && continue_delta[0]) {
+			const char *base = augmented_prompt ? augmented_prompt : prompt;
+			size_t need = strlen(continue_delta) + strlen(base) + 2;
+			final_prompt = (char *)malloc(need);
+			if (final_prompt)
+				snprintf(final_prompt, need, "%s\n%s", continue_delta, base);
+		}
+	}
+	free(continue_delta);
+
 	aicli_allowed_file_t allow_files[32];
 	for (int ai = 0; ai < file_count; ai++) {
 		allow_files[ai].path = allow_paths[ai];
@@ -1271,7 +1751,7 @@ static int cmd_run(int argc, char **argv, const aicli_config_t *cfg)
 	aicli_allowlist_t allow = {.files = allow_files, .file_count = file_count};
 	char *final_text = NULL;
 	char *final_response_json = NULL;
-	const char *to_send = augmented_prompt ? augmented_prompt : prompt;
+	const char *to_send = final_prompt ? final_prompt : (augmented_prompt ? augmented_prompt : prompt);
 	// tool_choice semantics (Responses API): "none" disables, "auto" lets model decide,
 	// or force a specific tool by name.
 	const char *tool_choice = NULL;
@@ -1322,10 +1802,23 @@ static int cmd_run(int argc, char **argv, const aicli_config_t *cfg)
 				// Fallback: keep continuity from what we used.
 				to_write = previous_response_id;
 			}
-			if (to_write && state_path[0])
-				(void)aicli_continue_write_id(state_path, to_write);
+			if (to_write && state_path[0]) {
+				if (aicli_continue_write_id(state_path, to_write) == 0) {
+					if (!curr_meta.loaded) {
+						continue_meta_from_current(&curr_meta, cfg, auto_search, disable_all_tools,
+								     available_tools, force_tool,
+								     debug_api, debug_function_call,
+								     turns, max_tool_calls, tool_threads,
+								     &cont);
+					}
+					curr_meta.has_saved_unix = true;
+					curr_meta.saved_unix = (long long)time(NULL);
+					(void)continue_meta_write(state_path, &curr_meta);
+				}
+			}
 		}
 	}
+	free(final_prompt);
 	free(augmented_prompt);
 	// Free allowlisted paths after the tool loop finishes.
 	for (int fi = 0; fi < file_count; fi++)
